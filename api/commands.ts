@@ -5,7 +5,12 @@
  */
 
 export {
+  listAllSessions,
   registerTelegramCommand,
+  type ExtensionCommandContextActions,
   type TelegramExtensionCommandContext,
   type TelegramExtensionCommandRegistration,
+  type TelegramExtensionCommandContextView,
+  type TelegramSessionInfo,
+  type TelegramSessionManager,
 } from "../lib/commands.ts";

@@ -12,13 +12,16 @@ import {
   type BeforeAgentStartEvent,
   type ExtensionAPI,
   type ExtensionCommandContext,
+  type ExtensionCommandContextActions,
   type ExtensionContext,
   type InputEvent,
   type SessionBeforeCompactEvent,
   type SessionCompactEvent,
+  type SessionInfo,
   type SessionShutdownEvent,
   type SessionStartEvent,
   type SlashCommandInfo,
+  SessionManager,
   SettingsManager,
 } from "@earendil-works/pi-coding-agent";
 
@@ -30,14 +33,17 @@ export type {
   BeforeAgentStartEvent,
   ExtensionAPI,
   ExtensionCommandContext,
+  ExtensionCommandContextActions,
   ExtensionContext,
   InputEvent,
   SessionBeforeCompactEvent,
   SessionCompactEvent,
+  SessionInfo,
   SessionShutdownEvent,
   SessionStartEvent,
   SlashCommandInfo,
 };
+export { SessionManager };
 
 export interface ToolExecutionStartEvent {
   type: "tool_execution_start";

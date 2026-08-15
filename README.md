@@ -94,6 +94,7 @@ Enable the optional capabilities the bridge needs in [@BotFather](https://t.me/B
 | Telegram UI harness | Menus, settings, callbacks, Rich Markdown, drafts, active status, buttons, voice, and files |
 | Multi-instance organism | One leader plus explicit visible followers routed through Telegram private-chat threads |
 | Extension platform | Commands, sections, status rows, update handlers, inbound/outbound handlers, and voice providers |
+| Session membrane | Companion commands receive fresh, fenced lifecycle actions and narrow current-session metadata through Pi's public command path; picker metadata comes from Pi's own session enumeration |
 | Safety boundary | No hidden Pi processes, no fake terminal, no PTY tricks, no arbitrary TUI slash-command forwarding |
 
 ## Feature Showcase

@@ -20,6 +20,30 @@ import * as Runtime from "../lib/runtime.ts";
 import * as TextGroups from "../lib/text-groups.ts";
 import * as Threads from "../lib/threads.ts";
 import * as Updates from "../lib/updates.ts";
+import type { ExtensionCommandContext } from "../lib/pi.ts";
+
+function createTestExtensionCommandBridge(): Commands.TelegramExtensionCommandBridge {
+  const context = {
+    cwd: "/repo",
+    sessionManager: {
+      getTree: () => [],
+      getEntries: () => [],
+      getSessionFile: () => "/repo/session.jsonl",
+      getSessionId: () => "fixture-session",
+    },
+    waitForIdle: async () => {},
+    newSession: async () => ({ cancelled: false }),
+    fork: async (_entryId: string) => ({ cancelled: false }),
+    navigateTree: async (_entryId: string) => ({ cancelled: false }),
+    switchSession: async (_sessionPath: string) => ({ cancelled: false }),
+    reload: async () => {},
+  } as unknown as ExtensionCommandContext;
+  return {
+    execute: async (handler) => {
+      await handler(context);
+    },
+  };
+}
 
 interface TestContext {
   cwd: string;
@@ -244,6 +268,7 @@ test("Routing runtime forwards authorized text messages into prompt queueing", a
     sendUserMessage: (message, options) => {
       events.push(`user:${message}:${options?.deliverAs ?? "default"}`);
     },
+    extensionCommandBridge: createTestExtensionCommandBridge(),
     isIdle: () => true,
     hasPendingMessages: () => false,
     compact: () => undefined,
@@ -593,6 +618,7 @@ function createRouteHarness(options: RouteHarnessOptions = {}) {
     sendUserMessage: (message, opts) => {
       events.push(`user:${message}:${opts?.deliverAs ?? "default"}`);
     },
+    extensionCommandBridge: createTestExtensionCommandBridge(),
     isIdle: () => true,
     hasPendingMessages: () => false,
     compact: () => undefined,
@@ -1915,9 +1941,13 @@ test("Routing runtime keeps extension command replies in the invoking thread", a
       slot: "A",
     });
     await threadStore.persist();
+    let projectedContext: Commands.TelegramExtensionCommandContext | undefined;
     const successDispose = Commands.registerTelegramCommand({
       name: "pingx",
-      handler: async ({ reply }) => reply("pong"),
+      handler: async (ctx) => {
+        projectedContext = ctx;
+        await ctx.reply("pong");
+      },
     });
     const failureDispose = Commands.registerTelegramCommand({
       name: "failx",
@@ -1947,6 +1977,17 @@ test("Routing runtime keeps extension command replies in the invoking thread", a
 
       assert.equal(events.includes("reply:pong"), true);
       assert.equal(events.includes("reply:Command failed."), true);
+      assert.deepEqual(Object.keys(projectedContext?.actions ?? {}).sort(), [
+        "fork",
+        "navigateTree",
+        "newSession",
+        "reload",
+        "switchSession",
+        "waitForIdle",
+      ]);
+      assert.deepEqual(Object.keys(projectedContext?.ctx ?? {}), [
+        "sessionManager",
+      ]);
       assert.equal(
         events.filter((event) => event === "reply-target:100:42").length,
         2,

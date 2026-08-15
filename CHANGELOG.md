@@ -2,6 +2,12 @@
 
 > Each release keeps at most 8 outcome records of at most 512 characters.
 
+## 0.28.0-fork.1: Session Membrane Acquisition
+
+- `Session Actions`: Telegram companion commands now acquire a fresh Pi command context through the public `sendUserMessage` → registered-command path, exposing only fenced lifecycle actions and read-only current-session accessors.
+- `Session Listing`: `listAllSessions()` delegates to Pi's public `SessionManager.listAll()` and returns picker metadata without full transcript bodies.
+- `Live Evidence`: The disposable real-Pi tracer proves fresh contexts, stale-action rejection, lifecycle-only projection, isolated listing, and bounded shutdown.
+
 ## 0.28.0: Durable Inbound And Protocol Reconstruction
 
 - `Owned Polling Request`: Only `getUpdates` gets an automatic budget: Telegram long-poll timeout plus 10 seconds. Poller abort settles requests and API retry waits; broad ordinary, media, and follower budgets were removed.

@@ -147,6 +147,7 @@ test("Domain test filenames mirror their owning lib domain", () => {
   );
   const nonLibTestDomains = new Set([
     "dependency-audit",
+    "fork-membrane",
     "index",
     "integration",
     "invariants",

@@ -1,6 +1,6 @@
 {
   "name": "@llblab/pi-telegram",
-  "version": "0.28.0",
+  "version": "0.28.0-fork.1",
   "private": false,
   "publishConfig": {
     "access": "public"
@@ -30,6 +30,8 @@
     "test": "node --experimental-strip-types --test --test-concurrency=4 --test-reporter=dot tests/*.test.ts",
     "test:verbose": "node --experimental-strip-types --test --test-reporter=spec tests/*.test.ts",
     "typecheck": "tsc --noEmit",
+    "check:upstream": "node --experimental-strip-types scripts/check-upstream.ts",
+    "trace:fork": "node --experimental-strip-types scripts/run-fork-tracer.ts",
     "audit": "npm audit --omit=peer",
     "audit:host": "npm audit",
     "pack:check": "npm pack --dry-run",

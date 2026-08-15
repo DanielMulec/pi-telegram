@@ -653,6 +653,7 @@ export interface TelegramInboundRouteRuntimeDeps<
     message: string,
     options?: Queue.TelegramPromptDeliveryOptions,
   ) => void;
+  extensionCommandBridge?: Commands.TelegramExtensionCommandBridge;
   isIdle: (ctx: TContext) => boolean;
   hasPendingMessages: (ctx: TContext) => boolean;
   compact: (
@@ -2089,8 +2090,18 @@ export function createTelegramInboundRouteRuntime<
       const sourceTarget = Updates.getTelegramMessageTarget(message);
       const assertExecutionCurrent =
         Updates.createTelegramUpdateExecutionFenceGuard(message);
-      try {
-        assertExecutionCurrent();
+      const invokeExtensionCommand = async (
+        commandContext: Commands.ExtensionCommandContext,
+      ): Promise<void> => {
+        const actions = Commands.createTelegramExtensionCommandActions(
+          commandContext,
+          assertExecutionCurrent,
+        );
+        const contextView =
+          Commands.createTelegramExtensionCommandContextView(
+            commandContext,
+            assertExecutionCurrent,
+          );
         await extensionCommand.handler({
           name: command.name,
           args: command.args,
@@ -2117,7 +2128,16 @@ export function createTelegramInboundRouteRuntime<
               ctx,
             );
           },
+          ctx: contextView,
+          actions,
         });
+      };
+      try {
+        assertExecutionCurrent();
+        if (!deps.extensionCommandBridge) {
+          throw new Error("Telegram session command bridge is unavailable");
+        }
+        await deps.extensionCommandBridge.execute(invokeExtensionCommand);
         assertExecutionCurrent();
       } catch (error) {
         deps.recordRuntimeEvent?.("telegram-command", error, {

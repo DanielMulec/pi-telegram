@@ -70,6 +70,8 @@ export default function (pi: Pi.ExtensionAPI) {
     setModel,
     setThinkingLevel,
   } = piRuntime;
+  const telegramExtensionCommandBridge =
+    Commands.createTelegramExtensionCommandBridge(pi, sendUserMessage);
   const bridgeRuntime = Runtime.createTelegramBridgeRuntime();
   const runtimeDiagnostics =
     Logs.createTelegramRuntimeDiagnosticsRuntime<Pi.ExtensionContext>();
@@ -787,6 +789,7 @@ export default function (pi: Pi.ExtensionAPI) {
     }),
     setModel,
     sendUserMessage,
+    extensionCommandBridge: telegramExtensionCommandBridge,
     isIdle,
     hasPendingMessages,
     compact,

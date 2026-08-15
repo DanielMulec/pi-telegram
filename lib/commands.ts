@@ -4,11 +4,18 @@
  * Owns Telegram slash-command normalization, bot command metadata, and pi-side command registration behind runtime ports
  */
 
+import { randomUUID } from "node:crypto";
+
 import {
   pairTelegramUserIfNeeded,
   TELEGRAM_DEFAULT_PROFILE_NAME,
 } from "./config.ts";
-import type { ExtensionAPI, ExtensionCommandContext } from "./pi.ts";
+import {
+  SessionManager,
+  type ExtensionAPI,
+  type ExtensionCommandContext,
+  type ExtensionCommandContextActions,
+} from "./pi.ts";
 import type { TelegramBridgeStatusLineOptions } from "./status.ts";
 import {
   createTelegramControlItemBuilder,
@@ -35,12 +42,161 @@ export interface TelegramPromptTemplateMenuCommand {
 
 const TELEGRAM_EXTENSION_COMMAND_REGISTRY_KEY = "__piTelegramCommandRegistry__";
 const TELEGRAM_BOT_COMMAND_NAME_PATTERN = /^[a-z0-9_]{1,32}$/;
+const TELEGRAM_EXTENSION_BRIDGE_COMMAND = "telegram-session-bridge";
+
+export type TelegramSessionManager = Pick<
+  SessionManager,
+  "getTree" | "getEntries" | "getSessionFile" | "getSessionId"
+>;
+
+export interface TelegramExtensionCommandContextView {
+  sessionManager: TelegramSessionManager;
+}
 
 export interface TelegramExtensionCommandContext {
   name: string;
   args: string;
   reply: (text: string) => Promise<void>;
   enqueuePrompt: (prompt: string) => Promise<void>;
+  /** Read-only Pi session enumeration for companion pickers. */
+  ctx: TelegramExtensionCommandContextView;
+  /** Fenced lifecycle actions supplied by a fresh Pi command context. */
+  actions: ExtensionCommandContextActions;
+}
+
+export type {
+  ExtensionCommandContext,
+  ExtensionCommandContextActions,
+};
+
+export interface TelegramExtensionCommandBridge {
+  execute(
+    handler: (ctx: ExtensionCommandContext) => Promise<void>,
+  ): Promise<void>;
+}
+
+/**
+ * Register the private Pi command used to acquire a fresh command context.
+ * The Telegram command and its arguments stay in the process-local request map;
+ * only an opaque one-use token crosses Pi's public prompt path.
+ */
+export function createTelegramExtensionCommandBridge(
+  pi: Pick<ExtensionAPI, "registerCommand">,
+  sendUserMessage: ExtensionAPI["sendUserMessage"],
+): TelegramExtensionCommandBridge {
+  type PendingRequest = {
+    handler: (ctx: ExtensionCommandContext) => Promise<void>;
+    resolve: () => void;
+    reject: (error: unknown) => void;
+  };
+  const pending = new Map<string, PendingRequest>();
+  pi.registerCommand(TELEGRAM_EXTENSION_BRIDGE_COMMAND, {
+    handler: async (args, ctx) => {
+      const requestId = args.trim();
+      const request = pending.get(requestId);
+      if (!request) {
+        throw new Error("Unknown Telegram session bridge request");
+      }
+      pending.delete(requestId);
+      void request.handler(ctx).then(request.resolve, request.reject);
+    },
+  });
+  return {
+    execute(handler) {
+      const requestId = randomUUID();
+      let resolveRequest!: () => void;
+      let rejectRequest!: (error: unknown) => void;
+      const completion = new Promise<void>((resolve, reject) => {
+        resolveRequest = resolve;
+        rejectRequest = reject;
+      });
+      pending.set(requestId, {
+        handler: async (ctx) => {
+          await handler(ctx);
+        },
+        resolve: resolveRequest,
+        reject: rejectRequest,
+      });
+      try {
+        sendUserMessage(`/${TELEGRAM_EXTENSION_BRIDGE_COMMAND} ${requestId}`);
+      } catch (error) {
+        pending.delete(requestId);
+        rejectRequest(error);
+      }
+      return completion;
+    },
+  };
+}
+
+export function createTelegramExtensionCommandActions(
+  ctx: ExtensionCommandContext,
+  assertExecutionCurrent?: () => void,
+): ExtensionCommandContextActions {
+  const run = <T>(action: () => Promise<T>): Promise<T> => {
+    assertExecutionCurrent?.();
+    return action().then((result) => {
+      assertExecutionCurrent?.();
+      return result;
+    });
+  };
+  return {
+    waitForIdle: () => run(() => ctx.waitForIdle()),
+    newSession: (options) => run(() => ctx.newSession(options)),
+    fork: (entryId, options) => run(() => ctx.fork(entryId, options)),
+    navigateTree: (targetId, options) =>
+      run(() => ctx.navigateTree(targetId, options)),
+    switchSession: (sessionPath, options) =>
+      run(() => ctx.switchSession(sessionPath, options)),
+    reload: () => run(() => ctx.reload()),
+  };
+}
+
+export function createTelegramExtensionCommandContextView(
+  ctx: ExtensionCommandContext,
+  assertExecutionCurrent?: () => void,
+): TelegramExtensionCommandContextView {
+  const sessionManager = ctx.sessionManager;
+  const read = <T>(accessor: () => T): T => {
+    assertExecutionCurrent?.();
+    return accessor();
+  };
+  return {
+    sessionManager: {
+      getTree: () => read(() => sessionManager.getTree()),
+      getEntries: () => read(() => sessionManager.getEntries()),
+      getSessionFile: () => read(() => sessionManager.getSessionFile()),
+      getSessionId: () => read(() => sessionManager.getSessionId()),
+    },
+  };
+}
+
+export interface TelegramSessionInfo {
+  path: string;
+  id: string;
+  cwd: string;
+  name?: string;
+  parentSessionPath?: string;
+  created: Date;
+  modified: Date;
+  messageCount: number;
+}
+
+export async function listAllSessions(options?: {
+  sessionDir?: string;
+}): Promise<TelegramSessionInfo[]> {
+  const sessions = await SessionManager.listAll(options?.sessionDir);
+  return sessions.map((session) => ({
+    path: session.path,
+    id: session.id,
+    cwd: session.cwd,
+    ...(session.name === undefined ? {} : { name: session.name }),
+    ...(session.parentSessionPath === undefined
+      ? {}
+      : { parentSessionPath: session.parentSessionPath }),
+    created: session.created,
+    modified: session.modified,
+    messageCount: session.messageCount,
+  }));
 }
 
 export interface TelegramExtensionCommandRegistration {
