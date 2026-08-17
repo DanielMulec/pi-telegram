@@ -11,6 +11,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  TELEGRAM_EXTENSION_BRIDGE_TIMEOUT_MS,
   createTelegramExtensionCommandActions,
   createTelegramExtensionCommandBridge,
   createTelegramExtensionCommandContextView,
@@ -90,6 +91,48 @@ function createPublicCommandHarness(contexts: FixtureContext[]) {
     getDispatchError: () => dispatchError,
   };
 }
+
+test("claimed command context is not acquisition-timed-out while the handler runs", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  try {
+    const harness = createPublicCommandHarness([
+      createFixtureContext("session-timeout"),
+    ]);
+    let release!: () => void;
+    let resolveStarted!: () => void;
+    const started = new Promise<void>((resolve) => {
+      resolveStarted = resolve;
+    });
+    const executePromise = harness.bridge.execute(async () => {
+      resolveStarted();
+      await new Promise<void>((resolve) => {
+        release = resolve;
+      });
+    });
+    await started;
+
+    let outcome: "pending" | "resolved" | "rejected" = "pending";
+    void executePromise.then(
+      () => {
+        outcome = "resolved";
+      },
+      () => {
+        outcome = "rejected";
+      },
+    );
+
+    t.mock.timers.tick(TELEGRAM_EXTENSION_BRIDGE_TIMEOUT_MS);
+    await Promise.resolve();
+    assert.equal(outcome, "pending");
+    assert.equal(harness.getDispatchError(), undefined);
+
+    release();
+    await executePromise;
+    assert.equal(outcome, "resolved");
+  } finally {
+    t.mock.timers.reset();
+  }
+});
 
 test("The public Pi command path supplies fresh fenced lifecycle actions", async () => {
   const first = createFixtureContext("session-a");

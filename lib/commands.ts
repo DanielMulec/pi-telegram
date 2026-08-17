@@ -89,6 +89,8 @@ export function createTelegramExtensionCommandBridge(
     handler: (ctx: ExtensionCommandContext) => Promise<void>;
     resolve: () => void;
     reject: (error: unknown) => void;
+    acquired: boolean;
+    clearAcquisitionTimer: () => void;
   };
   const pending = new Map<string, PendingRequest>();
   pi.registerCommand(TELEGRAM_EXTENSION_BRIDGE_COMMAND, {
@@ -98,6 +100,8 @@ export function createTelegramExtensionCommandBridge(
       if (!request) {
         throw new Error("Unknown Telegram session bridge request");
       }
+      request.acquired = true;
+      request.clearAcquisitionTimer();
       void request.handler(ctx).then(
         () => {
           if (pending.get(requestId) === request) pending.delete(requestId);
@@ -117,7 +121,9 @@ export function createTelegramExtensionCommandBridge(
       let resolveRequest!: () => void;
       let rejectRequest!: (error: unknown) => void;
       const clearTimer = () => {
-        if (timer !== undefined) clearTimeout(timer);
+        if (timer === undefined) return;
+        clearTimeout(timer);
+        timer = undefined;
       };
       const completion = new Promise<void>((resolve, reject) => {
         resolveRequest = () => {
@@ -135,10 +141,12 @@ export function createTelegramExtensionCommandBridge(
         },
         resolve: resolveRequest,
         reject: rejectRequest,
+        acquired: false,
+        clearAcquisitionTimer: clearTimer,
       };
       pending.set(requestId, request);
       timer = setTimeout(() => {
-        if (pending.get(requestId) !== request) return;
+        if (request.acquired || pending.get(requestId) !== request) return;
         pending.delete(requestId);
         rejectRequest(
           new Error("Timed out acquiring a Telegram command context"),
