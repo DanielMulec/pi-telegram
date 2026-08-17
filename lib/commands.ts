@@ -43,6 +43,7 @@ export interface TelegramPromptTemplateMenuCommand {
 const TELEGRAM_EXTENSION_COMMAND_REGISTRY_KEY = "__piTelegramCommandRegistry__";
 const TELEGRAM_BOT_COMMAND_NAME_PATTERN = /^[a-z0-9_]{1,32}$/;
 const TELEGRAM_EXTENSION_BRIDGE_COMMAND = "telegram-session-bridge";
+export const TELEGRAM_EXTENSION_BRIDGE_TIMEOUT_MS = 15_000;
 
 export type TelegramSessionManager = Pick<
   SessionManager,
@@ -97,28 +98,65 @@ export function createTelegramExtensionCommandBridge(
       if (!request) {
         throw new Error("Unknown Telegram session bridge request");
       }
-      pending.delete(requestId);
-      void request.handler(ctx).then(request.resolve, request.reject);
+      void request.handler(ctx).then(
+        () => {
+          if (pending.get(requestId) === request) pending.delete(requestId);
+          request.resolve();
+        },
+        (error) => {
+          if (pending.get(requestId) === request) pending.delete(requestId);
+          request.reject(error);
+        },
+      );
     },
   });
   return {
     execute(handler) {
       const requestId = randomUUID();
+      let timer: ReturnType<typeof setTimeout> | undefined;
       let resolveRequest!: () => void;
       let rejectRequest!: (error: unknown) => void;
+      const clearTimer = () => {
+        if (timer !== undefined) clearTimeout(timer);
+      };
       const completion = new Promise<void>((resolve, reject) => {
-        resolveRequest = resolve;
-        rejectRequest = reject;
+        resolveRequest = () => {
+          clearTimer();
+          resolve();
+        };
+        rejectRequest = (error) => {
+          clearTimer();
+          reject(error);
+        };
       });
-      pending.set(requestId, {
+      const request: PendingRequest = {
         handler: async (ctx) => {
           await handler(ctx);
         },
         resolve: resolveRequest,
         reject: rejectRequest,
-      });
+      };
+      pending.set(requestId, request);
+      timer = setTimeout(() => {
+        if (pending.get(requestId) !== request) return;
+        pending.delete(requestId);
+        rejectRequest(
+          new Error("Timed out acquiring a Telegram command context"),
+        );
+      }, TELEGRAM_EXTENSION_BRIDGE_TIMEOUT_MS);
+      timer.unref?.();
       try {
-        sendUserMessage(`/${TELEGRAM_EXTENSION_BRIDGE_COMMAND} ${requestId}`);
+        (
+          sendUserMessage as (
+            content: Parameters<ExtensionAPI["sendUserMessage"]>[0],
+            options?: Parameters<ExtensionAPI["sendUserMessage"]>[1] & {
+              expandPromptTemplates?: boolean;
+            },
+          ) => void
+        )(
+          `/${TELEGRAM_EXTENSION_BRIDGE_COMMAND} ${requestId}`,
+          { expandPromptTemplates: true },
+        );
       } catch (error) {
         pending.delete(requestId);
         rejectRequest(error);
@@ -181,10 +219,11 @@ export interface TelegramSessionInfo {
   messageCount: number;
 }
 
-export async function listAllSessions(options?: {
+export async function listSessions(options: {
+  cwd: string;
   sessionDir?: string;
 }): Promise<TelegramSessionInfo[]> {
-  const sessions = await SessionManager.listAll(options?.sessionDir);
+  const sessions = await SessionManager.list(options.cwd, options.sessionDir);
   return sessions.map((session) => ({
     path: session.path,
     id: session.id,

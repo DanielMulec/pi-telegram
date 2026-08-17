@@ -14,7 +14,7 @@ import {
   createTelegramExtensionCommandActions,
   createTelegramExtensionCommandBridge,
   createTelegramExtensionCommandContextView,
-  listAllSessions,
+  listSessions,
 } from "../lib/commands.ts";
 import { SessionManager, type ExtensionAPI, type ExtensionCommandContext } from "../lib/pi.ts";
 
@@ -61,13 +61,18 @@ function createFixtureContext(sessionId: string): FixtureContext {
 
 function createPublicCommandHarness(contexts: FixtureContext[]) {
   const commands = new Map<string, RegisteredCommand>();
+  const bridgeOptions: unknown[] = [];
   let dispatchError: unknown;
   const api: Pick<ExtensionAPI, "registerCommand"> = {
     registerCommand(name, options) {
       commands.set(name, options);
     },
   };
-  const sendUserMessage: ExtensionAPI["sendUserMessage"] = (content) => {
+  const sendUserMessage: ExtensionAPI["sendUserMessage"] = (
+    content,
+    options,
+  ) => {
+    bridgeOptions.push(options);
     if (typeof content !== "string") throw new Error("expected command text");
     const [rawCommandName, requestId] = content.split(/\s+/);
     const command = commands.get((rawCommandName ?? "").replace(/^\//, ""));
@@ -81,6 +86,7 @@ function createPublicCommandHarness(contexts: FixtureContext[]) {
   const bridge = createTelegramExtensionCommandBridge(api, sendUserMessage);
   return {
     bridge,
+    getBridgeOptions: () => bridgeOptions,
     getDispatchError: () => dispatchError,
   };
 }
@@ -108,6 +114,10 @@ test("The public Pi command path supplies fresh fenced lifecycle actions", async
   });
 
   assert.equal(harness.getDispatchError(), undefined);
+  assert.deepEqual(harness.getBridgeOptions(), [
+    { expandPromptTemplates: true },
+    { expandPromptTemplates: true },
+  ]);
   assert.notEqual(seenContexts[0], seenContexts[1]);
   assert.deepEqual(seenSessionIds, ["session-a", "session-b"]);
   assert.deepEqual(first.events, ["waitForIdle", "newSession"]);
@@ -176,13 +186,13 @@ test("Session listing uses Pi enumeration over an isolated fixture and drops tra
       header("00000000-0000-4000-8000-000000000002", "/fixture/project-b"),
     );
 
-    const sessions = await listAllSessions({ sessionDir });
+    const sessions = await listSessions({
+      cwd: "/fixture/project-a",
+      sessionDir,
+    });
     assert.deepEqual(
       sessions.map((session) => session.id).sort(),
-      [
-        "00000000-0000-4000-8000-000000000001",
-        "00000000-0000-4000-8000-000000000002",
-      ],
+      ["00000000-0000-4000-8000-000000000001"],
     );
     assert.equal(
       sessions.some(

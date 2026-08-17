@@ -3,7 +3,7 @@
 ## Fork Governance & Upstream Sync Policy
 
 - **Fork Status**: This repository is a deliberate, owner-approved fork (`DanielMulec/pi-telegram`) of `@llblab/pi-telegram`. Upstream package name `@llblab/pi-telegram`, MIT license, and original attribution are preserved.
-- **Scope (Membrane-Only)**: The fork is strictly the membrane core. It widens `TelegramExtensionCommandContext` with Pi session actions (`ctx.actions` / `ctx`) and exposes a narrow public session-listing capability (`listAllSessions` via `SessionManager.listAll`). Built-in session commands (`/new`, `/fork`, `/resume`) and interactive pickers live in companion extensions (e.g. `pi-remote`), not hardcoded in this fork.
+- **Scope (Membrane-Only)**: The fork is strictly the membrane core. It widens `TelegramExtensionCommandContext` with Pi session actions (`ctx.actions` / `ctx`) and exposes a narrow current-folder listing capability (`listSessions({ cwd })` via `SessionManager.list`). Built-in session commands (`/new`, `/fork`, `/resume`) and interactive pickers live in companion extensions (e.g. `pi-remote`), not hardcoded in this fork.
 - **Upstream Sync Strategy**: Tag-based 3-way merge per upstream release (`git fetch upstream --tags && git merge v0.X.Y`). Never rebase. Conflicts are resolved cleanly once per release tag.
 - **Versioning**: `0.28.0-fork.N` where the base version matches the upstream release tag and `-fork.N` denotes fork patch iterations.
 - **Latest-First Policy**: Keep the base version continuously aligned with upstream latest releases. Upstream release drift is monitored via `npm run check:upstream`.

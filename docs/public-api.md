@@ -57,7 +57,7 @@ Stable commands inside the paired Telegram DM:
 
 Hidden compatibility shortcuts may open sections directly: `/help`, `/status`, `/model`, `/thinking`, `/queue`, and `/settings`.
 
-This command surface is a mobile companion subset, not a raw terminal-command bridge or session browser. A Telegram destination follows its assigned Pi instance and sends prompts into that instance's currently active session; it is not permanently bound to one session identity. Compaction operates on the current session, while new-session, resume, fork, tree navigation, session switching, TUI transcript clearing, and arbitrary slash-command dispatch stay out of the stable Telegram API unless Pi exposes safe public extension hooks for them.
+This command surface is a mobile companion subset, not a raw terminal-command bridge or session browser. A Telegram destination follows its assigned Pi instance and sends prompts into that instance's currently active session; it is not permanently bound to one session identity. Compaction operates on the current session, while companion extensions may use the fork's narrow lifecycle membrane for new-session, resume, fork, tree navigation, and session switching. Arbitrary slash-command dispatch remains outside the contract.
 
 ### Tools and assistant-authored actions
 
@@ -209,7 +209,7 @@ This inventory maps the complete bridge capability plane to its supported extens
 
 - **Programmatic artifact/media delivery:** `telegram_attach` covers agent-authored artifacts, while companion JavaScript has no general file/media send contract. The first 0.21 delivery slice targets operational text/activity views; media should earn a typed extension only from a concrete companion use case.
 - **General configuration mutation:** Companions own their configuration and Settings state. pi-telegram does not expose unrestricted mutation of `telegram.json`, profile identity, pairing, rendering, queue, or transport settings.
-- **Process and session control:** Reload, new-session, fork, resume, process launch, and arbitrary Pi slash-command dispatch remain outside the Telegram companion API until Pi exposes safe async extension hooks.
+- **Process and session control:** Reload, new-session, fork, resume, and tree navigation are available only through the narrow lifecycle membrane; process launch and arbitrary Pi slash-command dispatch remain outside the Telegram companion API.
 
 The 0.21 platform boundary lets a public-import-only consumer own reasoning, intermediate-prose, and tool-row policy while pi-telegram retains target selection, transport, authorization, lifecycle safety, and delivery ordering. Activity-specific examples live in this documentation; the separate [`pi-telegram-extension-demo`](https://github.com/llblab/pi-telegram-extension-demo) project remains the maintained companion-extension reference.
 
@@ -237,7 +237,7 @@ Contract:
 - Routing precedence is built-in bridge commands first, registered extension commands second, and prompt-template aliases after that. This lets an extension intentionally claim a command name; prompt-template owners can resolve collisions by renaming the template alias.
 - `showInMenu` defaults to `false`. When `true`, `emoji` is required and the command appears in `/start` help with that marker; it also joins Bot API command sync only when `description` is provided, because Telegram command-list entries require descriptions. The emoji is prefixed to the Bot API description as well. Workflow/product commands should opt in deliberately instead of expanding the core command row by default.
 - The command context provides `name`, `args`, `reply(text)`, and `enqueuePrompt(prompt)`, plus `actions` with only `waitForIdle`, `newSession`, `fork`, `navigateTree`, `switchSession`, and `reload`. `ctx` is a narrow read-only view exposing only `sessionManager.getTree()`, `getEntries()`, `getSessionFile()`, and `getSessionId()`; it is not Pi's generic command context. Use `enqueuePrompt()` when a command should create normal queued Pi work rather than perform immediate Telegram-side handling.
-- `listAllSessions({ sessionDir? })` uses Pi's public `SessionManager.listAll()` and returns picker metadata without transcript bodies (`allMessagesText`/`firstMessage`).
+- `listSessions({ cwd, sessionDir? })` uses Pi's public `SessionManager.list(cwd)` for current-folder `/resume` and returns picker metadata without transcript bodies (`allMessagesText`/`firstMessage`).
 - Handler failures are isolated: the bridge records a `telegram-command` runtime diagnostic, sends a compact failure reply, and keeps Telegram polling/routing alive.
 
 Core commands stay reserved for bridge lifecycle, transport ownership, queue safety, and essential operator controls. Opinionated workflow commands should live in companion extensions through this registry.

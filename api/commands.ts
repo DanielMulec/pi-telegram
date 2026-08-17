@@ -5,7 +5,7 @@
  */
 
 export {
-  listAllSessions,
+  listSessions,
   registerTelegramCommand,
   type ExtensionCommandContextActions,
   type TelegramExtensionCommandContext,

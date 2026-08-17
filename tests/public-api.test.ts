@@ -70,7 +70,7 @@ test("Public package subpaths expose the stable extension API", async () => {
     "registerTelegramUpdateHandler",
   ]);
   assert.deepEqual(Object.keys(commands).sort(), [
-    "listAllSessions",
+    "listSessions",
     "registerTelegramCommand",
   ]);
   assert.deepEqual(Object.keys(sections).sort(), [
@@ -100,15 +100,15 @@ test("Activity API declares the Pi lifecycle compatibility floor", async () => {
   ) as { peerDependencies?: Record<string, string> };
   assert.equal(
     packageJson.peerDependencies?.["@earendil-works/pi-coding-agent"],
-    ">=0.80.6",
+    ">=0.84.2",
   );
   assert.equal(
     packageJson.peerDependencies?.["@earendil-works/pi-agent-core"],
-    ">=0.80.6",
+    ">=0.84.2",
   );
   assert.equal(
     packageJson.peerDependencies?.["@earendil-works/pi-ai"],
-    ">=0.80.6",
+    ">=0.84.2",
   );
 });
 

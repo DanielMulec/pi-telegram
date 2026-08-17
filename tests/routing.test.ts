@@ -22,7 +22,13 @@ import * as Threads from "../lib/threads.ts";
 import * as Updates from "../lib/updates.ts";
 import type { ExtensionCommandContext } from "../lib/pi.ts";
 
-function createTestExtensionCommandBridge(): Commands.TelegramExtensionCommandBridge {
+function flushImmediate(): Promise<void> {
+  return new Promise((resolve) => setImmediate(resolve));
+}
+
+function createTestExtensionCommandBridge(
+  actionEvents?: string[],
+): Commands.TelegramExtensionCommandBridge {
   const context = {
     cwd: "/repo",
     sessionManager: {
@@ -32,7 +38,10 @@ function createTestExtensionCommandBridge(): Commands.TelegramExtensionCommandBr
       getSessionId: () => "fixture-session",
     },
     waitForIdle: async () => {},
-    newSession: async () => ({ cancelled: false }),
+    newSession: async () => {
+      actionEvents?.push("newSession");
+      return { cancelled: false };
+    },
     fork: async (_entryId: string) => ({ cancelled: false }),
     navigateTree: async (_entryId: string) => ({ cancelled: false }),
     switchSession: async (_sessionPath: string) => ({ cancelled: false }),
@@ -356,6 +365,7 @@ test("Routing runtime forwards authorized text messages into prompt queueing", a
     },
     { cwd: "/repo" },
   );
+  await flushImmediate();
   disposeFailingCommand();
   assert.equal(events.includes("event:telegram-command:boom"), true);
   assert.equal(events.includes("reply:Command failed."), true);
@@ -482,6 +492,7 @@ interface RouteHarnessOptions {
     TestContext,
     TestModel
   >["inboundHandlerRuntime"]["process"];
+  extensionCommandBridge?: Commands.TelegramExtensionCommandBridge;
 }
 
 function createRouteHarness(options: RouteHarnessOptions = {}) {
@@ -618,7 +629,8 @@ function createRouteHarness(options: RouteHarnessOptions = {}) {
     sendUserMessage: (message, opts) => {
       events.push(`user:${message}:${opts?.deliverAs ?? "default"}`);
     },
-    extensionCommandBridge: createTestExtensionCommandBridge(),
+    extensionCommandBridge:
+      options.extensionCommandBridge ?? createTestExtensionCommandBridge(),
     isIdle: () => true,
     hasPendingMessages: () => false,
     compact: () => undefined,
@@ -1955,12 +1967,20 @@ test("Routing runtime keeps extension command replies in the invoking thread", a
         throw new Error("boom");
       },
     });
+    const actionEvents: string[] = [];
+    const swapDispose = Commands.registerTelegramCommand({
+      name: "swapx",
+      handler: async (ctx) => {
+        await ctx.actions.newSession();
+      },
+    });
     try {
       const { events, routeRuntime } = createRouteHarness({
         threadStore,
+        extensionCommandBridge: createTestExtensionCommandBridge(actionEvents),
       });
 
-      for (const [index, text] of ["/pingx", "/failx"].entries()) {
+      for (const [index, text] of ["/pingx", "/failx", "/swapx"].entries()) {
         await routeRuntime.handleUpdate(
           {
             message: {
@@ -1973,8 +1993,11 @@ test("Routing runtime keeps extension command replies in the invoking thread", a
           },
           { cwd: "/repo" },
         );
+        if (text === "/swapx") assert.deepEqual(actionEvents, []);
+        await flushImmediate();
       }
 
+      assert.deepEqual(actionEvents, ["newSession"]);
       assert.equal(events.includes("reply:pong"), true);
       assert.equal(events.includes("reply:Command failed."), true);
       assert.deepEqual(Object.keys(projectedContext?.actions ?? {}).sort(), [
@@ -1995,6 +2018,7 @@ test("Routing runtime keeps extension command replies in the invoking thread", a
     } finally {
       successDispose();
       failureDispose();
+      swapDispose();
     }
   });
 });

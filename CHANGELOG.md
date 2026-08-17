@@ -5,8 +5,9 @@
 ## 0.28.0-fork.1: Session Membrane Acquisition
 
 - `Session Actions`: Telegram companion commands now acquire a fresh Pi command context through the public `sendUserMessage` → registered-command path, exposing only fenced lifecycle actions and read-only current-session accessors.
-- `Session Listing`: `listAllSessions()` delegates to Pi's public `SessionManager.listAll()` and returns picker metadata without full transcript bodies.
-- `Live Evidence`: The disposable real-Pi tracer proves fresh contexts, stale-action rejection, lifecycle-only projection, isolated listing, and bounded shutdown.
+- `Session Listing`: `listSessions({ cwd })` delegates to Pi's public `SessionManager.list(cwd)` and returns current-folder picker metadata without full transcript bodies.
+- `Command Settlement`: Session lifecycle actions run after the Telegram update settles; bridge acquisition enables prompt-template dispatch and fails closed after 15 seconds.
+- `Live Evidence`: The disposable real-Pi tracer proves fresh contexts, lifecycle-only projection, and that the private bridge token never becomes model input.
 
 ## 0.28.0: Durable Inbound And Protocol Reconstruction
 

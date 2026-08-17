@@ -2132,25 +2132,38 @@ export function createTelegramInboundRouteRuntime<
           actions,
         });
       };
-      try {
-        assertExecutionCurrent();
-        if (!deps.extensionCommandBridge) {
-          throw new Error("Telegram session command bridge is unavailable");
-        }
-        await deps.extensionCommandBridge.execute(invokeExtensionCommand);
-        assertExecutionCurrent();
-      } catch (error) {
+      const handleExtensionCommandFailure = (error: unknown): void => {
         deps.recordRuntimeEvent?.("telegram-command", error, {
           command: command.name,
         });
-        assertExecutionCurrent();
-        await deps.sendTextReply(
-          message.chat.id,
-          message.message_id,
-          "Command failed.",
-          { target: sourceTarget },
-        );
-      }
+        try {
+          assertExecutionCurrent();
+        } catch {
+          return;
+        }
+        void deps
+          .sendTextReply(
+            message.chat.id,
+            message.message_id,
+            "Command failed.",
+            { target: sourceTarget },
+          )
+          .catch(() => undefined);
+      };
+      // Let Telegram settle before a session action can stop its update worker.
+      setImmediate(() => {
+        try {
+          assertExecutionCurrent();
+          if (!deps.extensionCommandBridge) {
+            throw new Error("Telegram session command bridge is unavailable");
+          }
+          void deps.extensionCommandBridge
+            .execute(invokeExtensionCommand)
+            .catch(handleExtensionCommandFailure);
+        } catch (error) {
+          handleExtensionCommandFailure(error);
+        }
+      });
       return true;
     },
     expandPromptTemplateCommand: (commandName, args) =>
