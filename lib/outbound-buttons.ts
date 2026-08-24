@@ -83,7 +83,7 @@ export interface TelegramButtonCallbackHandlerDeps<TContext = unknown> {
     query: TelegramButtonCallbackQuery,
     action: TelegramOutboundButtonAction,
     ctx: TContext,
-  ) => Promise<false | "new" | "edit">;
+  ) => Promise<false | "new" | "edit" | "undelivered">;
   editMessageReplyMarkup?: (
     chatId: number,
     messageId: number,
@@ -287,6 +287,16 @@ export async function handleTelegramButtonCallbackQuery<TContext = unknown>(
     try {
       const viewMode = await deps.invokeBoundAction(query, action, ctx);
       if (viewMode) {
+        // "undelivered" means the bound action committed but its Telegram view
+        // did not land; answer truthfully instead of reporting an unchanged
+        // failure that invites replaying an already-applied action.
+        if (viewMode === "undelivered") {
+          await deps.answerCallbackQuery(
+            query.id,
+            "Done, but the screen could not be refreshed.",
+          );
+          return true;
+        }
         if (viewMode === "new" && query.data && query.message?.reply_markup) {
           const selectedMarkup = markTelegramButtonSelected(
             query.message.reply_markup,

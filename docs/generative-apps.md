@@ -1,6 +1,6 @@
 # Generative Apps Runtime For Telegram
 
-_Status: incremental implementation. Canonical installation and explicit transactional replacement, agent-side method invocation, state/history commits, partial-tail recovery, cross-process transition locking with dead-owner recovery, installation-generation plus revision rejection for direct app-output controls, lifecycle-cancelled worker-isolated methods, the bounded non-shell process port, strict bound-action parsing, pre-model-queue `tgbtn` dispatch, new-message default views, and opt-in in-place bound-action edits with explicit-action send fallback are implemented locally. Agent-mediated initial-surface revision capture, process-birth lock proof, voice delivery, automatic refresh scheduling, removal, and complete lifecycle diagnostics remain open in the backlog._
+_Status: incremental implementation. Canonical installation and explicit transactional replacement, agent-side method invocation, state/history commits, partial-tail recovery, cross-process transition locking with dead-owner recovery, installation-generation plus revision rejection for direct app-output controls, lifecycle-cancelled worker-isolated methods, the bounded non-shell process port, strict bound-action parsing, pre-model-queue `tgbtn` dispatch, new-message default views, opt-in in-place bound-action edits with explicit-action send fallback, and truthful redraw recovery when committed bound-action delivery fails are implemented locally. Agent-mediated initial-surface revision capture, process-birth lock proof, voice delivery, automatic refresh scheduling, removal, and complete lifecycle diagnostics remain open in the backlog._
 
 ## Purpose
 
@@ -245,6 +245,8 @@ A generic `exec(arbitrary-shell-command)` Generative App is forbidden. It would 
 ## Live Views
 
 A Generative App sends a new message after a successful bound user action by default. This simple mode preserves prior surfaces and their visibly selected buttons, is robust across ordinary Telegram constraints, and remains a first-class behavior rather than a fallback to eliminate. A method may opt into `viewMode: "edit"` to replace the callback message and keyboard in place; if that explicit action cannot edit a deleted or otherwise unavailable message, it may send one fresh view because the click itself supplies recreation authority.
+
+A committed bound action is never reported as an unchanged failure. If Telegram delivery of the new view fails, the runtime redraws the same already-committed result once (without re-running the method) and, if that redraw also fails, answers the callback truthfully (`Done, but the screen could not be refreshed.`) so the phone can recover or redraw current app state without replaying the action. Execution-fence aborts after commit stay fatal: a replaced session performs no further delivery work for the old generation.
 
 Automatic refresh is not implemented in the current runtime. The intended future contract uses an exported `refresh` method and a bounded scheduling hint; applications must not return or rely on that hint until the backlog item is complete:
 

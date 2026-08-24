@@ -460,6 +460,32 @@ test("Button callback handler answers bound-action failures without queue fallba
   assert.deepEqual(answered, ["Generative App action failed."]);
 });
 
+test("Button callback handler answers committed bound actions truthfully when delivery never lands", async () => {
+  const answered: string[] = [];
+  const handled = await handleTelegramButtonCallbackQuery(
+    {
+      id: "q-bound-undelivered",
+      data: "tgbtn:bound-undelivered",
+      message: { message_id: 2, chat: { id: 1 } },
+    },
+    "ctx",
+    {
+      resolveAction: () => ({ text: "Next", prompt: "music::next" }),
+      answerCallbackQuery: async (_id, text) => {
+        answered.push(text ?? "");
+      },
+      invokeBoundAction: async () => "undelivered",
+      enqueueButtonPrompt: () => {
+        throw new Error("committed bound actions must not enter the model queue");
+      },
+    },
+  );
+  assert.equal(handled, true);
+  assert.deepEqual(answered, [
+    "Done, but the screen could not be refreshed.",
+  ]);
+});
+
 test("Button callback handler enqueues owned actions, marks the selected button, and consumes expired buttons", async () => {
   const answered: string[] = [];
   const enqueued: unknown[] = [];

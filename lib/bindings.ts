@@ -179,14 +179,15 @@ export function createTelegramGenerativeAppBoundButtonActionInvoker<
 }): (
   action: OutboundHandlers.TelegramOutboundButtonAction,
   query: TQuery,
-) => Promise<false | "new" | "edit"> {
+) => Promise<false | "new" | "edit" | "undelivered"> {
   return async (action, query) => {
     let boundAction: GenerativeApps.GenerativeAppBoundAction | undefined;
+    let committed: GenerativeApps.GenerativeAppInvocationResult;
     try {
       boundAction = GenerativeApps.parseGenerativeAppBoundAction(action.prompt);
       if (!boundAction) return false;
       deps.assertExecutionCurrent(query);
-      const result = await GenerativeApps.invokeGenerativeApp({
+      committed = await GenerativeApps.invokeGenerativeApp({
         agentDir: deps.agentDir,
         ...(deps.getExecutionFence(query)
           ? { execution: deps.getExecutionFence(query) }
@@ -203,20 +204,32 @@ export function createTelegramGenerativeAppBoundButtonActionInvoker<
         method: boundAction.method,
         app: boundAction.app,
       });
-      deps.assertExecutionCurrent(query);
+    } catch (error) {
+      deps.recordRuntimeEvent("generative-app", error, {
+        phase: "bound-action",
+        ...(boundAction
+          ? { app: boundAction.app, method: boundAction.method }
+          : {}),
+      });
+      throw error;
+    }
+    // From here the method is committed; delivery failures must never surface
+    // as an unchanged action failure. Redraw once from the already-committed
+    // result (no method replay), then let the callback answer truthfully.
+    const deliver = async (): Promise<"new" | "edit"> => {
       const chatId = query.message?.chat?.id;
       const messageId = query.message?.message_id;
       if (typeof chatId !== "number" || typeof messageId !== "number") {
         throw new Error("Generative App callback target is unavailable.");
       }
-      const reply = deps.planOutput(result.output, {
+      const reply = deps.planOutput(committed.output, {
         binding: {
-          generation: result.generation,
-          app: result.app,
-          revision: result.revision,
+          generation: committed.generation,
+          app: committed.app,
+          revision: committed.revision,
         },
       });
-      if (result.viewMode === "edit" && deps.editInteractiveMessage) {
+      if (committed.viewMode === "edit" && deps.editInteractiveMessage) {
         let editFailed = false;
         try {
           await deps.editInteractiveMessage(
@@ -230,8 +243,8 @@ export function createTelegramGenerativeAppBoundButtonActionInvoker<
           editFailed = true;
           deps.recordRuntimeEvent("generative-app", error, {
             phase: "bound-action-edit-fallback",
-            app: boundAction.app,
-            method: boundAction.method,
+            app: committed.app,
+            method: committed.method,
           });
         }
         deps.assertExecutionCurrent(query);
@@ -243,14 +256,28 @@ export function createTelegramGenerativeAppBoundButtonActionInvoker<
       });
       deps.assertExecutionCurrent(query);
       return "new";
+    };
+    try {
+      return await deliver();
     } catch (error) {
+      // Replacement stops stale activity: a fence abort stays fatal instead of
+      // triggering recovery on behalf of a replaced session.
+      deps.assertExecutionCurrent(query);
       deps.recordRuntimeEvent("generative-app", error, {
-        phase: "bound-action",
-        ...(boundAction
-          ? { app: boundAction.app, method: boundAction.method }
-          : {}),
+        phase: "bound-action-delivery",
+        app: committed.app,
+        method: committed.method,
       });
-      throw error;
+      try {
+        return await deliver();
+      } catch (redrawError) {
+        deps.recordRuntimeEvent("generative-app", redrawError, {
+          phase: "bound-action-redraw",
+          app: committed.app,
+          method: committed.method,
+        });
+        return "undelivered";
+      }
     }
   };
 }

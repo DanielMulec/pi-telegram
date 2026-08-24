@@ -159,6 +159,7 @@
 - `Session Listing`: `listSessions({ cwd })` delegates to Pi's public `SessionManager.list(cwd)` and returns current-folder picker metadata without full transcript bodies.
 - `Command Settlement`: Session lifecycle actions run after the Telegram update settles; bridge acquisition enables prompt-template dispatch and fails closed after 15 seconds only if the handler never claims the context.
 - `Live Evidence`: The disposable real-Pi tracer proves fresh contexts, lifecycle-only projection, and that the private bridge token never becomes model input.
+- `Bound-Action Delivery Truth`: A committed Generative App button action is never reported as an unchanged failure. When Telegram delivery of the new view fails, the runtime redraws the same committed result once without re-running the method, then answers the callback truthfully so the phone can recover current app state without replaying the action.
 
 ## 0.28.0: Durable Inbound And Protocol Reconstruction
 

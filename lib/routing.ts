@@ -594,7 +594,7 @@ export interface TelegramInboundRouteRuntimeDeps<
     action: OutboundHandlers.TelegramOutboundButtonAction,
     query: TCallbackQuery,
     ctx: TContext,
-  ) => Promise<false | "new" | "edit">;
+  ) => Promise<false | "new" | "edit" | "undelivered">;
   inboundHandlerRuntime: TelegramInboundHandlerRuntime<TContext>;
   threadStore?: Threads.TelegramTopicTargetStore;
   updateStatus: (ctx: TContext, error?: string) => void;

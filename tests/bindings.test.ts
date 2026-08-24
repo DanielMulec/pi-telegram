@@ -4,7 +4,7 @@
  */
 
 import assert from "node:assert/strict";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -148,6 +148,159 @@ export function increment({ state }) {
     );
     assert.deepEqual(edited, ["next"]);
     assert.deepEqual(sent, ["next"]);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+async function writeCounterApp(root: string): Promise<string> {
+  const script = join(root, "counter.mjs");
+  await writeFile(
+    script,
+    `
+export function init() { return { state: { count: 0 }, output: "ready" }; }
+export function increment({ state }) {
+  return { state: { count: state.count + 1 }, output: "next" };
+}
+`,
+    "utf8",
+  );
+  return script;
+}
+
+test("Generative App bound-button delivery failure redraws committed state without replaying the action", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-telegram-binding-redraw-"));
+  const agentDir = join(root, "agent");
+  const script = await writeCounterApp(root);
+  const store = Outbound.createTelegramButtonActionStore();
+  try {
+    let attempt = 0;
+    const invoke = createTelegramGenerativeAppBoundButtonActionInvoker({
+      agentDir,
+      assertExecutionCurrent: () => undefined,
+      getExecutionFence: () => undefined,
+      planOutput: Outbound.createTelegramOutboundReplyPlanner(store),
+      sendMarkdownReply: async (_chatId, _messageId) => {
+        attempt += 1;
+        if (attempt === 1) throw new Error("telegram unavailable");
+      },
+      recordRuntimeEvent: () => undefined,
+    });
+    const installed = await GenerativeApps.installGenerativeApp({
+      agentDir,
+      app: "counter",
+      script,
+    });
+    assert.equal(
+      await invoke(
+        {
+          binding: {
+            generation: installed.generation,
+            app: "counter",
+            revision: 0,
+          },
+          prompt: "counter::increment",
+          text: "Next",
+        },
+        { message: { chat: { id: 1 }, message_id: 2 } },
+      ),
+      "new",
+    );
+    // Exactly one committed transition despite two delivery attempts.
+    const timeline = await readFile(
+      join(agentDir, "genapps", "counter", "states.jsonl"),
+      "utf8",
+    );
+    assert.deepEqual(
+      timeline.trim().split("\n").map((line) => JSON.parse(line).revision),
+      [0, 1],
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("Generative App bound-button total delivery failure answers undelivered instead of failing the committed action", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-telegram-binding-undelivered-"));
+  const agentDir = join(root, "agent");
+  const script = await writeCounterApp(root);
+  const store = Outbound.createTelegramButtonActionStore();
+  try {
+    const invoke = createTelegramGenerativeAppBoundButtonActionInvoker({
+      agentDir,
+      assertExecutionCurrent: () => undefined,
+      getExecutionFence: () => undefined,
+      planOutput: Outbound.createTelegramOutboundReplyPlanner(store),
+      sendMarkdownReply: async () => {
+        throw new Error("telegram unavailable");
+      },
+      recordRuntimeEvent: () => undefined,
+    });
+    const installed = await GenerativeApps.installGenerativeApp({
+      agentDir,
+      app: "counter",
+      script,
+    });
+    assert.equal(
+      await invoke(
+        {
+          binding: {
+            generation: installed.generation,
+            app: "counter",
+            revision: 0,
+          },
+          prompt: "counter::increment",
+          text: "Next",
+        },
+        { message: { chat: { id: 1 }, message_id: 2 } },
+      ),
+      "undelivered",
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("Generative App bound-button redraw keeps execution-fence aborts fatal after commit", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-telegram-binding-fence-"));
+  const agentDir = join(root, "agent");
+  const script = await writeCounterApp(root);
+  const store = Outbound.createTelegramButtonActionStore();
+  try {
+    let deliveryFailed = false;
+    const invoke = createTelegramGenerativeAppBoundButtonActionInvoker({
+      agentDir,
+      assertExecutionCurrent: () => {
+        if (deliveryFailed) throw new Error("execution is no longer current");
+      },
+      getExecutionFence: () => undefined,
+      planOutput: Outbound.createTelegramOutboundReplyPlanner(store),
+      sendMarkdownReply: async () => {
+        deliveryFailed = true;
+        throw new Error("telegram unavailable");
+      },
+      recordRuntimeEvent: () => undefined,
+    });
+    const installed = await GenerativeApps.installGenerativeApp({
+      agentDir,
+      app: "counter",
+      script,
+    });
+    await assert.rejects(
+      invoke(
+        {
+          binding: {
+            generation: installed.generation,
+            app: "counter",
+            revision: 0,
+          },
+          prompt: "counter::increment",
+          text: "Next",
+        },
+        { message: { chat: { id: 1 }, message_id: 2 } },
+      ),
+      /no longer current/,
+    );
   } finally {
     await rm(root, { recursive: true, force: true });
   }
