@@ -153,7 +153,7 @@
 
 - `Bundled Skills`: Added discoverable `telegram-bridge` and `button-console` Skills through package metadata and source-checkout resource discovery. Stable turn, delivery, action, Threaded Mode, formatting, handler, and diagnosis guidance now lives in the bridge Skill, while Button Console provides optional evidence-backed CLI navigation.
 - `Model Context Contraction`: Removed the redundant `telegram_help` model tool and its repeated guidance implementation. Compact authority-aware prompts route agents to the bundled Skill, while disconnect/recovery now suppresses and restores only the two delivery tools without affecting foreign tools.
-## 0.28.0-fork.1: Session Membrane Acquisition
+## 0.38.0-fork.1: Session Membrane Acquisition
 
 - `Session Actions`: Telegram companion commands now acquire a fresh Pi command context through the public `sendUserMessage` → registered-command path, exposing only fenced lifecycle actions and read-only current-session accessors.
 - `Session Listing`: `listSessions({ cwd })` delegates to Pi's public `SessionManager.list(cwd)` and returns current-folder picker metadata without full transcript bodies.
