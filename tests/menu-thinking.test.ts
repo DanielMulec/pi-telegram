@@ -27,17 +27,19 @@ test("Thinking menu text and reply markup expose all levels with current marker"
   const markup = buildThinkingMenuReplyMarkup("medium");
   assert.equal(markup.inline_keyboard[0]?.[0]?.text, "⬆️ Main menu");
   assert.equal(markup.inline_keyboard[0]?.[0]?.callback_data, "menu:back");
-  assert.equal(
-    markup.inline_keyboard.some((row) => row[0]?.text === "🟢 medium"),
-    true,
-  );
-  assert.equal(
-    markup.inline_keyboard.every(
-      (row, index) =>
-        index === 0 || row[0]?.callback_data.startsWith("thinking:set:"),
-    ),
-    true,
-  );
+  assert.deepEqual(markup.inline_keyboard.slice(1), [
+    [{ text: "off", callback_data: "thinking:set:off" }],
+    [
+      { text: "minimal", callback_data: "thinking:set:minimal" },
+      { text: "low", callback_data: "thinking:set:low" },
+      { text: "🟢 medium", callback_data: "thinking:set:medium" },
+    ],
+    [
+      { text: "high", callback_data: "thinking:set:high" },
+      { text: "xhigh", callback_data: "thinking:set:xhigh" },
+      { text: "max", callback_data: "thinking:set:max" },
+    ],
+  ]);
 });
 
 test("Thinking callback sets valid levels and reports current level", async () => {

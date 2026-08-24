@@ -116,6 +116,13 @@ function createStore(
       boundary: "before-write" | "after-write-before-rename",
       publicationPath: string,
     ) => void;
+    onRecovery?: (event: {
+      kind: "repaired" | "reset";
+      path: string;
+      revision?: number;
+      quarantinePath?: string;
+      reason: string;
+    }) => void;
   } = {},
 ) {
   return createTelegramUpdateJournalStore({
@@ -132,6 +139,7 @@ function createStore(
     },
     getQueueProcessLiveness: options.getQueueProcessLiveness,
     onPublicationBoundary: options.onPublicationBoundary,
+    onRecovery: options.onRecovery,
   });
 }
 
@@ -426,6 +434,34 @@ test("Update journal appends batches, deduplicates exact replay, and removes ent
   });
 });
 
+test("Update journal publishes and retains a monotonic admission cursor with its batch", async () => {
+  await withJournalTempDir(async ({ path }) => {
+    const store = createStore(path);
+    const appended = store.appendBatch(
+      [{ update_id: 10 }, { update_id: 11 }],
+      11,
+    );
+    assert.deepEqual(appended.addedUpdateIds, [10, 11]);
+    assert.equal(store.read().acceptedThroughUpdateId, 11);
+
+    store.removeCompleted([10, 11]);
+    const settled = store.read();
+    assert.deepEqual(settled.entries, []);
+    assert.equal(settled.acceptedThroughUpdateId, 11);
+
+    assert.throws(
+      () => store.appendBatch([{ update_id: 12 }], 11),
+      (error) => isJournalError(error, "invalid"),
+    );
+    assert.throws(
+      () => store.appendBatch([], 10),
+      (error) => isJournalError(error, "conflict"),
+    );
+    store.appendBatch([], 12);
+    assert.equal(store.read().acceptedThroughUpdateId, 12);
+  });
+});
+
 test("Update journal accepts revision-zero snapshots and publishes private atomic segments", async () => {
   await withJournalTempDir(async ({ dir, path }) => {
     const store = createStore(path);
@@ -481,7 +517,7 @@ test("Update journal accepts revision-zero snapshots and publishes private atomi
   });
 });
 
-test("Update journal reconstructs ordered segments and rejects gaps and identity mismatches", async () => {
+test("Update journal reconstructs ordered segments, rejects foreign identity, and resets gaps", async () => {
   await withJournalTempDir(async ({ path }) => {
     const store = createStore(path);
     store.appendBatch([{ update_id: 1 }]);
@@ -518,11 +554,6 @@ test("Update journal reconstructs ordered segments and rejects gaps and identity
       string,
       unknown
     >;
-    source.previousRevision = 0;
-    await writeFile(segmentPath, `${JSON.stringify(source, null, 2)}\n`);
-    assert.throws(() => store.read(), /revision gap/u);
-
-    source.previousRevision = 1;
     source.profile = "foreign";
     await writeFile(segmentPath, `${JSON.stringify(source, null, 2)}\n`);
     assert.throws(
@@ -531,13 +562,214 @@ test("Update journal reconstructs ordered segments and rejects gaps and identity
         error instanceof TelegramUpdateJournalError &&
         error.code === "identity-mismatch",
     );
+
+    source.profile = "work";
+    source.previousRevision = 0;
+    await writeFile(segmentPath, `${JSON.stringify(source, null, 2)}\n`);
+    const reset = store.read();
+    assert.equal(reset.revision, undefined);
+    assert.deepEqual(reset.entries, []);
+  });
+});
+
+test("Update journal repairs a revisionless snapshot from a later segment tail", async () => {
+  await withJournalTempDir(async ({ path }) => {
+    const recoveryEvents: Array<{ kind: "repaired" | "reset"; revision?: number }> = [];
+    const store = createStore(path, {
+      onRecovery: (event) => recoveryEvents.push(event),
+    });
+    store.appendBatch([{ update_id: 1 }]);
+    await mkdir(`${path}.segments`);
+    await writeFile(
+      join(`${path}.segments`, "0000000000000002.json"),
+      `${JSON.stringify(
+        {
+          version: 1,
+          revision: 2,
+          previousRevision: 1,
+          profile: "work",
+          botIdentity: identity,
+          upsertedEntries: [],
+          removedUpdateIds: [1],
+        },
+        null,
+        2,
+      )}\n`,
+    );
+
+    const repaired = store.read();
+    assert.equal(repaired.revision, 2);
+    assert.deepEqual(repaired.entries, []);
+    assert.equal(recoveryEvents[0]?.kind, "repaired");
+    assert.equal(recoveryEvents[0]?.revision, 2);
+    const snapshot = JSON.parse(await readFile(path, "utf8")) as {
+      revision?: number;
+    };
+    assert.equal(snapshot.revision, 1);
+  });
+});
+
+test("Update journal quarantines and resets an uncertain orphaned segment history", async () => {
+  await withJournalTempDir(async ({ path }) => {
+    const recoveryEvents: Array<{
+      kind: "repaired" | "reset";
+      quarantinePath?: string;
+      reason: string;
+    }> = [];
+    const store = createStore(path, {
+      onRecovery: (event) => recoveryEvents.push(event),
+    });
+    store.appendBatch([{ update_id: 1 }]);
+    publishTelegramUpdateJournalSegment(path, {
+      version: 1,
+      revision: 1,
+      previousRevision: 0,
+      profile: "work",
+      botIdentity: identity,
+      upsertedEntries: [],
+      removedUpdateIds: [],
+    });
+    await rm(path);
+
+    const reset = store.read();
+    assert.equal(reset.revision, undefined);
+    assert.deepEqual(reset.entries, []);
+    assert.equal(recoveryEvents.length, 1);
+    assert.equal(recoveryEvents[0]?.kind, "reset");
+    assert.match(recoveryEvents[0]?.reason ?? "", /missing while .*segments/u);
+    const quarantinePath = recoveryEvents[0]?.quarantinePath;
+    assert.ok(quarantinePath);
+    assert.deepEqual(await readdir(quarantinePath), [
+      "inbox.work.json.segments",
+    ]);
+    assert.deepEqual(
+      await readdir(join(quarantinePath, "inbox.work.json.segments")),
+      ["0000000000000001.json"],
+    );
+    await assert.rejects(() => stat(`${path}.segments`), /ENOENT/u);
+    assert.deepEqual(store.appendBatch([{ update_id: 2 }]).addedUpdateIds, [2]);
+  });
+});
+
+test("Update journal restores orphaned segments when reset publication fails", async () => {
+  await withJournalTempDir(async ({ path }) => {
+    const seed = createStore(path);
+    seed.appendBatch([{ update_id: 1 }]);
+    publishTelegramUpdateJournalSegment(path, {
+      version: 1,
+      revision: 1,
+      previousRevision: 0,
+      profile: "work",
+      botIdentity: identity,
+      upsertedEntries: [],
+      removedUpdateIds: [],
+    });
+    await rm(path);
+    const recovering = createStore(path, {
+      onPublicationBoundary: (boundary, publicationPath) => {
+        if (boundary === "before-write" && publicationPath === path) {
+          throw new Error("reset publication blocked");
+        }
+      },
+    });
+
+    assert.throws(() => recovering.read(), /mutation failed/u);
+    await assert.rejects(() => stat(path), /ENOENT/u);
+    assert.deepEqual(await readdir(`${path}.segments`), [
+      "0000000000000001.json",
+    ]);
+    assert.deepEqual(seed.read().entries, []);
+  });
+});
+
+test("Update journal repairs a cleanup-orphaned empty segment history", async () => {
+  await withJournalTempDir(async ({ path }) => {
+    const recoveryEvents: Array<{ kind: "repaired" | "reset"; revision?: number }> = [];
+    const store = createStore(path, {
+      onRecovery: (event) => recoveryEvents.push(event),
+    });
+    store.appendBatch([{ update_id: 1 }]);
+    publishTelegramUpdateJournalSegment(path, {
+      version: 1,
+      revision: 1,
+      previousRevision: 0,
+      profile: "work",
+      botIdentity: identity,
+      upsertedEntries: [],
+      removedUpdateIds: [1],
+    });
+    publishTelegramUpdateJournalSegment(path, {
+      version: 1,
+      revision: 2,
+      previousRevision: 1,
+      profile: "work",
+      botIdentity: identity,
+      upsertedEntries: [
+        {
+          updateId: 2,
+          update: { update_id: 2 },
+          admittedAtMs: 2,
+          state: "pending",
+        },
+      ],
+      removedUpdateIds: [],
+    });
+    publishTelegramUpdateJournalSegment(path, {
+      version: 1,
+      revision: 3,
+      previousRevision: 2,
+      profile: "work",
+      botIdentity: identity,
+      upsertedEntries: [],
+      removedUpdateIds: [2],
+    });
+    await rm(path);
+
+    const recovered = store.read();
+    assert.equal(recovered.revision, 3);
+    assert.deepEqual(recovered.entries, []);
+    const snapshot = JSON.parse(await readFile(path, "utf8")) as {
+      revision?: number;
+      entries: unknown[];
+    };
+    assert.equal(snapshot.revision, 3);
+    assert.deepEqual(snapshot.entries, []);
+    assert.deepEqual(recoveryEvents, [{
+      kind: "repaired",
+      revision: 3,
+      path,
+      reason: "Recovered a missing snapshot from a complete empty segment history.",
+    }]);
+    assert.deepEqual((await readdir(`${path}.segments`)).sort(), [
+      "0000000000000001.json",
+      "0000000000000002.json",
+      "0000000000000003.json",
+    ]);
+  });
+});
+
+test("Update journal recovers the admission cursor from a cleanup-orphaned empty segment chain", async () => {
+  await withJournalTempDir(async ({ path }) => {
+    const store = createStore(path);
+    store.appendBatch([{ update_id: 1 }], 1);
+    store.removeCompleted([1]);
+    await rm(path);
+
+    const recovered = store.read();
+    assert.equal(recovered.revision, 1);
+    assert.deepEqual(recovered.entries, []);
+    assert.equal(recovered.acceptedThroughUpdateId, 1);
+    const snapshot = JSON.parse(await readFile(path, "utf8")) as {
+      acceptedThroughUpdateId?: number;
+    };
+    assert.equal(snapshot.acceptedThroughUpdateId, 1);
   });
 });
 
 test("Update journal compacts at the segment-count threshold without losing authority", async () => {
   await withJournalTempDir(async ({ path }) => {
     const store = createStore(path);
-    store.appendBatch([{ update_id: 1 }]);
+    store.appendBatch([{ update_id: 1 }], 1);
     for (
       let revision = 1;
       revision < TELEGRAM_UPDATE_JOURNAL_COMPACTION_SEGMENT_COUNT;
@@ -575,8 +807,9 @@ test("Update journal compacts at the segment-count threshold without losing auth
       TELEGRAM_UPDATE_JOURNAL_COMPACTION_SEGMENT_COUNT - 1,
     );
     assert.deepEqual(before.entries, []);
+    assert.equal(before.acceptedThroughUpdateId, 1);
 
-    store.appendBatch([{ update_id: 2 }]);
+    store.appendBatch([{ update_id: 2 }], 2);
     const compacted = store.read();
     assert.equal(
       compacted.revision,
@@ -586,15 +819,18 @@ test("Update journal compacts at the segment-count threshold without losing auth
       compacted.entries.map((entry) => entry.updateId),
       [2],
     );
+    assert.equal(compacted.acceptedThroughUpdateId, 2);
     await assert.rejects(() => readdir(`${path}.segments`), /ENOENT/u);
     const snapshot = JSON.parse(await readFile(path, "utf8")) as {
       revision?: number;
+      acceptedThroughUpdateId?: number;
       entries: Array<{ updateId: number }>;
     };
     assert.equal(
       snapshot.revision,
       TELEGRAM_UPDATE_JOURNAL_COMPACTION_SEGMENT_COUNT,
     );
+    assert.equal(snapshot.acceptedThroughUpdateId, 2);
     assert.deepEqual(snapshot.entries.map((entry) => entry.updateId), [2]);
   });
 });
@@ -888,6 +1124,38 @@ test("Update journal publication interruption preserves prior authority", async 
         store.read().entries.map((entry) => entry.updateId),
         [1],
       );
+    }
+  });
+});
+
+test("Update journal cursor publication interruption retains the prior batch and cursor", async () => {
+  await withJournalTempDir(async ({ path }) => {
+    const store = createStore(path);
+    store.appendBatch([{ update_id: 1 }], 1);
+    for (const boundary of [
+      "before-write",
+      "after-write-before-rename",
+    ] as const) {
+      const interrupted = createStore(path, {
+        onPublicationBoundary(candidate, publicationPath) {
+          if (
+            candidate === boundary &&
+            publicationPath.endsWith("0000000000000001.json")
+          ) {
+            throw new Error(`cursor-interrupted:${boundary}`);
+          }
+        },
+      });
+      assert.throws(
+        () => interrupted.appendBatch([{ update_id: 2 }], 2),
+        (error: unknown) =>
+          error instanceof TelegramUpdateJournalError &&
+          (error.cause as Error | undefined)?.message ===
+            `cursor-interrupted:${boundary}`,
+      );
+      const retained = store.read();
+      assert.equal(retained.acceptedThroughUpdateId, 1);
+      assert.deepEqual(retained.entries.map((entry) => entry.updateId), [1]);
     }
   });
 });
@@ -2366,9 +2634,10 @@ test("Update journal atomically rebinds a fully drained journal", async () => {
         botId: 42,
       }),
     });
-    original.appendBatch([{ update_id: 1 }]);
+    original.appendBatch([{ update_id: 1 }], 1);
     original.removeCompleted([1]);
     assert.equal(original.read().entries.length, 0);
+    assert.equal(original.read().acceptedThroughUpdateId, 1);
 
     const reboundIdentity = createTelegramUpdateJournalBotIdentity({
       botToken: "token-b",
@@ -2383,6 +2652,7 @@ test("Update journal atomically rebinds a fully drained journal", async () => {
     assert.equal(snapshot.profile, "other");
     assert.deepEqual(snapshot.botIdentity, reboundIdentity);
     assert.deepEqual(snapshot.entries, []);
+    assert.equal(snapshot.acceptedThroughUpdateId, undefined);
     rebound.appendBatch([{ update_id: 2 }]);
     assert.deepEqual(
       rebound.read().entries.map((entry) => entry.updateId),

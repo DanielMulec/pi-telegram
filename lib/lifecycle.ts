@@ -40,8 +40,15 @@ export function createAgentStartDedupHook(
   };
 }
 
+type TelegramBeforeAgentStartEvent = Omit<
+  BeforeAgentStartEvent,
+  "systemPrompt"
+> & {
+  systemPrompt: string | string[];
+};
+
 export interface TelegramBeforeAgentStartResult {
-  systemPrompt?: string;
+  systemPrompt?: string | string[];
 }
 
 type TelegramBeforeAgentStartReturn =
@@ -72,7 +79,7 @@ export interface TelegramLifecycleRegistrationDeps {
     ctx: ExtensionContext,
   ) => Promise<void> | void;
   onBeforeAgentStart: (
-    event: BeforeAgentStartEvent,
+    event: TelegramBeforeAgentStartEvent,
     ctx: ExtensionContext,
   ) => TelegramBeforeAgentStartReturn;
   onModelSelect: (
@@ -581,7 +588,16 @@ export function registerTelegramLifecycleHooks(
     if (!isActive(ctx)) return;
     await deps.onSessionCompact?.(event, ctx);
   });
-  pi.on("before_agent_start", async (event, ctx) => {
+  // The Pi SDK still types this result as a string; compatible runtimes may
+  // preserve ordered system prompt blocks through the same public hook.
+  const registerBeforeAgentStart = pi.on.bind(pi) as unknown as (
+    event: "before_agent_start",
+    handler: (
+      event: TelegramBeforeAgentStartEvent,
+      ctx: ExtensionContext,
+    ) => TelegramBeforeAgentStartReturn,
+  ) => void;
+  registerBeforeAgentStart("before_agent_start", async (event, ctx) => {
     return deps.onBeforeAgentStart(event, ctx);
   });
   pi.on("model_select", async (event, ctx) => {

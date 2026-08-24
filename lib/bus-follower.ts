@@ -47,6 +47,7 @@ import {
 export const TELEGRAM_BUS_FOLLOWER_PROMOTION_GRACE_MS = 2_500;
 export const TELEGRAM_FOLLOWER_SESSION_HANDOFF_TTL_MS = 30_000;
 export const TELEGRAM_BUS_FOLLOWER_CLIENT_TIMEOUT_MS = 30_000;
+export const TELEGRAM_BUS_FOLLOWER_REGISTRATION_WAIT_MS = 30_000;
 export const TELEGRAM_BUS_FOLLOWER_REGISTRATION_RETRY_ATTEMPTS =
   TELEGRAM_BUS_REGISTRATION_RETRY.attempts;
 export const TELEGRAM_BUS_FOLLOWER_REGISTRATION_RETRY_DELAY_MS =
@@ -167,6 +168,9 @@ export interface TelegramBusFollowerRegistrationState {
   getSlot: () => string | undefined;
   getThreadName: () => string | undefined;
   getGeneration: () => string | undefined;
+  beginRecovery: () => number;
+  cancelRecovery: () => void;
+  waitForGeneration: (timeoutMs?: number) => Promise<string | undefined>;
   getLeaderProtocol: () => TelegramBusProtocolIdentity | undefined;
   getEligibleElectionSlots: () => readonly string[];
   setEligibleElectionSlots: (slots: readonly string[]) => void;
@@ -214,6 +218,9 @@ export interface TelegramBusFollowerClientRuntimeDeps<TMessage = unknown> {
   getApiAuthSecret?: () => string | undefined;
   getForwardingAuthSecret?: () => string | undefined;
   getRegistrationGeneration: () => string | undefined;
+  waitForRegistrationGeneration?: (
+    timeoutMs?: number,
+  ) => Promise<string | undefined>;
   getForwardCommentBatchPosition?: (
     message: TMessage,
   ) => "comment" | "forward" | undefined;
@@ -231,6 +238,9 @@ export interface TelegramBusFollowerApiCallerDeps {
   createRequestId: () => string;
   getAuthSecret?: () => string | undefined;
   getRegistrationGeneration: () => string | undefined;
+  waitForRegistrationGeneration?: (
+    timeoutMs?: number,
+  ) => Promise<string | undefined>;
   getNowMs?: () => number;
   timeoutMs?: number;
 }
@@ -417,6 +427,7 @@ export interface TelegramBusFollowerHeartbeatRecoveryHandlerDeps<TContext> {
     | "getSlot"
     | "getThreadName"
     | "getEligibleElectionSlots"
+    | "beginRecovery"
     | "setRegistered"
   >;
   getRegistrationRuntime: () => TelegramBusFollowerRegistrationRuntime<TContext>;
@@ -638,6 +649,7 @@ export function createTelegramBusFollowerClientRuntime<
     socketPath: deps.socketPath,
     createRequestId,
     timeoutMs,
+    waitForRegistrationGeneration: deps.waitForRegistrationGeneration,
   };
   return {
     createRequestId,
@@ -695,14 +707,14 @@ export function createTelegramBusFollowerQueueHandoffClient(
   const timeoutMs =
     deps.timeoutMs ?? TELEGRAM_BUS_FOLLOWER_CLIENT_TIMEOUT_MS;
   return async (input) => {
-    const registrationGeneration = deps.getRegistrationGeneration();
-    if (!registrationGeneration) {
-      throw new Error("Telegram bus follower is not registered.");
-    }
+    const registration = await resolveTelegramBusFollowerRegistration(
+      deps,
+      timeoutMs,
+    );
     const socketPath = resolveTelegramBusSocketPath(deps.socketPath);
     const response = await sendTelegramBusLocalEnvelope({
       socketPath,
-      timeoutMs,
+      timeoutMs: registration.remainingTimeoutMs,
       retry: getTelegramBusTransportRetryPolicy({
         endpoint: socketPath,
         operation: "operation",
@@ -712,7 +724,7 @@ export function createTelegramBusFollowerQueueHandoffClient(
         requestId: deps.createRequestId(),
         auth: deps.getAuthSecret?.(),
         instanceId: deps.instanceId,
-        registrationGeneration,
+        registrationGeneration: registration.generation,
         ...input,
         sentAtMs: getNowMs(),
       },
@@ -770,11 +782,12 @@ export function createTelegramBusAgentMessageClient(
     envelope:
       | Extract<TelegramBusEnvelope, { kind: "follower.resolveAgentTarget" }>
       | Extract<TelegramBusEnvelope, { kind: "follower.routeAgentMessage" }>,
+    requestTimeoutMs = timeoutMs,
   ): Promise<unknown> => {
     const socketPath = resolveTelegramBusSocketPath(deps.socketPath);
     const response = await sendTelegramBusLocalEnvelope({
       socketPath,
-      timeoutMs,
+      timeoutMs: requestTimeoutMs,
       retry: getTelegramBusTransportRetryPolicy({
         endpoint: socketPath,
         operation: "operation",
@@ -788,26 +801,30 @@ export function createTelegramBusAgentMessageClient(
         : "Telegram bus agent message did not return an acknowledgement.",
     );
   };
-  const registrationFields = () => {
-    const registrationGeneration = deps.getRegistrationGeneration();
-    if (!registrationGeneration) {
-      throw new Error("Telegram bus follower is not registered.");
-    }
+  const registrationFields = async () => {
+    const registration = await resolveTelegramBusFollowerRegistration(
+      deps,
+      timeoutMs,
+    );
     return {
-      auth: deps.getAuthSecret?.(),
-      instanceId: deps.instanceId,
-      registrationGeneration,
+      fields: {
+        auth: deps.getAuthSecret?.(),
+        instanceId: deps.instanceId,
+        registrationGeneration: registration.generation,
+      },
+      remainingTimeoutMs: registration.remainingTimeoutMs,
     };
   };
   return {
     async resolveTarget(selector) {
+      const registration = await registrationFields();
       const result = await request({
         kind: "follower.resolveAgentTarget",
         requestId: deps.createRequestId(),
-        ...registrationFields(),
+        ...registration.fields,
         selector,
         sentAtMs: getNowMs(),
-      });
+      }, registration.remainingTimeoutMs);
       if (!result || typeof result !== "object" || Array.isArray(result)) {
         throw new Error("Telegram bus returned an invalid agent target.");
       }
@@ -821,13 +838,14 @@ export function createTelegramBusAgentMessageClient(
       return { chatId: target.chatId, threadId: target.threadId };
     },
     async routeMessage(message) {
+      const registration = await registrationFields();
       await request({
         kind: "follower.routeAgentMessage",
         requestId: deps.createRequestId(),
-        ...registrationFields(),
+        ...registration.fields,
         message,
         sentAtMs: getNowMs(),
-      });
+      }, registration.remainingTimeoutMs);
     },
   };
 }
@@ -839,16 +857,16 @@ export function createTelegramBusFollowerApiCaller(
   const timeoutMs =
     deps.timeoutMs ?? TELEGRAM_BUS_FOLLOWER_CLIENT_TIMEOUT_MS;
   return async (method, args) => {
+    const registration = await resolveTelegramBusFollowerRegistration(
+      deps,
+      timeoutMs,
+    );
     const socketPath = resolveTelegramBusSocketPath(deps.socketPath);
-    const registrationGeneration = deps.getRegistrationGeneration();
-    if (!registrationGeneration) {
-      throw new Error("Telegram bus follower is not registered.");
-    }
     let response: TelegramBusEnvelope | undefined;
     try {
       response = await sendTelegramBusLocalEnvelope({
         socketPath,
-        timeoutMs,
+        timeoutMs: registration.remainingTimeoutMs,
         retry: getTelegramBusTransportRetryPolicy({
           endpoint: socketPath,
           operation: "operation",
@@ -858,7 +876,7 @@ export function createTelegramBusFollowerApiCaller(
           requestId: deps.createRequestId(),
           auth: deps.getAuthSecret?.(),
           instanceId: deps.instanceId,
-          registrationGeneration,
+          registrationGeneration: registration.generation,
           method,
           args,
           sentAtMs: getNowMs(),
@@ -891,6 +909,29 @@ export function createTelegramBusFollowerApiCaller(
     }
     throw new Error(message ?? "Telegram bus API call failed.");
   };
+}
+
+async function resolveTelegramBusFollowerRegistration(
+  deps: Pick<
+    TelegramBusFollowerApiCallerDeps,
+    | "getRegistrationGeneration"
+    | "waitForRegistrationGeneration"
+    | "getNowMs"
+  >,
+  timeoutMs: number,
+): Promise<{ generation: string; remainingTimeoutMs: number }> {
+  const current = deps.getRegistrationGeneration();
+  if (current) return { generation: current, remainingTimeoutMs: timeoutMs };
+  const getNowMs = deps.getNowMs ?? Date.now;
+  const startedAtMs = getNowMs();
+  const restored = await deps.waitForRegistrationGeneration?.(
+    timeoutMs,
+  );
+  const remainingTimeoutMs = Math.max(0, timeoutMs - (getNowMs() - startedAtMs));
+  if (restored && remainingTimeoutMs > 0) {
+    return { generation: restored, remainingTimeoutMs };
+  }
+  throw new Error("Telegram bus follower is not registered.");
 }
 
 function isTelegramStaleContextError(error: unknown): boolean {
@@ -1046,12 +1087,52 @@ export function createTelegramBusFollowerRegistrationState(
   let generation: string | undefined;
   let leaderProtocol: TelegramBusProtocolIdentity | undefined;
   let eligibleElectionSlots: string[] = [];
+  let recoveryEpoch = 0;
+  let activeRecoveryEpoch: number | undefined;
+  const generationWaiters = new Set<{
+    epoch: number;
+    settle: (value: string | undefined) => void;
+  }>();
+  const settleGenerationWaiters = (
+    value: string | undefined,
+    epoch?: number,
+  ) => {
+    for (const waiter of [...generationWaiters]) {
+      if (epoch === undefined || waiter.epoch === epoch) waiter.settle(value);
+    }
+  };
   return {
     isRegistered: () => registered,
     getTarget: () => (target ? { ...target } : undefined),
     getSlot: () => slot,
     getThreadName: () => threadName,
     getGeneration: () => generation,
+    beginRecovery: () => {
+      if (activeRecoveryEpoch !== undefined) return activeRecoveryEpoch;
+      activeRecoveryEpoch = ++recoveryEpoch;
+      return activeRecoveryEpoch;
+    },
+    cancelRecovery: () => {
+      const epoch = activeRecoveryEpoch;
+      activeRecoveryEpoch = undefined;
+      if (epoch !== undefined) settleGenerationWaiters(undefined, epoch);
+    },
+    waitForGeneration: (timeoutMs = TELEGRAM_BUS_FOLLOWER_REGISTRATION_WAIT_MS) => {
+      if (generation) return Promise.resolve(generation);
+      const epoch = activeRecoveryEpoch;
+      if (epoch === undefined) return Promise.resolve(undefined);
+      return new Promise((resolve) => {
+        let timer: NodeJS.Timeout | undefined;
+        const settle = (value: string | undefined) => {
+          generationWaiters.delete(waiter);
+          if (timer) clearTimeout(timer);
+          resolve(value);
+        };
+        const waiter = { epoch, settle };
+        generationWaiters.add(waiter);
+        timer = setTimeout(() => settle(undefined), Math.max(0, timeoutMs));
+      });
+    },
     getLeaderProtocol: () =>
       leaderProtocol
         ? { ...leaderProtocol, capabilities: [...leaderProtocol.capabilities] }
@@ -1077,6 +1158,10 @@ export function createTelegramBusFollowerRegistrationState(
             }
           : undefined;
       if (availabilityChanged) options.onAvailabilityChanged?.();
+      if (generation) {
+        activeRecoveryEpoch = undefined;
+        settleGenerationWaiters(generation);
+      }
     },
   };
 }
@@ -1253,6 +1338,7 @@ export function createTelegramBusFollowerHeartbeatRecoveryHandler<TContext>(
   ): Promise<void> => {
     if (promotionPending) return;
     promotionPending = true;
+    deps.registrationState.beginRecovery();
     try {
       const initialBinding = carriedBinding ?? snapshotBinding();
       const state = deps.getLeaderState();
@@ -1366,6 +1452,7 @@ export function createTelegramBusFollowerRegistrationRuntime<
     heartbeatPromise = undefined;
     heartbeatPromiseGeneration = undefined;
     deps.setActiveAuthSecret?.(undefined);
+    deps.registrationState?.cancelRecovery();
     deps.registrationState?.setRegistered(false);
     lastKnownTarget = undefined;
     lastKnownSlot = undefined;

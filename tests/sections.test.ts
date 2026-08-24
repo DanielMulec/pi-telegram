@@ -660,7 +660,7 @@ test("buildTelegramSettingsMenuReplyMarkup injects extension settings rows", asy
   const markup = buildTelegramSettingsMenuReplyMarkup(
     false,
     false,
-    "hidden",
+    "manual",
     "hidden",
     registry,
   );
@@ -673,7 +673,7 @@ test("buildTelegramSettingsMenuReplyMarkup injects extension settings rows", asy
     [
       "📝 Draft previews: off",
       "🧾 Rendering: rich",
-      "👄 Voice reply: hidden",
+      "👄 Voice reply: manual",
       "🔬 Activity: quiet",
       "📌 Proactive push: off",
       "🕒 Time injection: hidden",

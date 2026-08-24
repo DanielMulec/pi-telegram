@@ -6,7 +6,7 @@ Living index of project documentation in `/docs`.
 
 ## Documents
 
-- [architecture.md](./architecture.md) — Overview of the Telegram bridge runtime, optional profile isolation, queueing model, native Rich Markdown delivery, UI/compat rendering, and interactive controls
+- [architecture.md](./architecture.md) — Overview of the Telegram bridge runtime, optional profile isolation, queueing model and Priority/Normal plus Keep/Skip reaction policy, native Rich Markdown delivery, UI/compat rendering, and interactive controls
 - [public-api.md](./public-api.md) — Stable public API map: package entrypoints, commands, config, assistant markup, extension APIs, smoke examples, and compatibility boundaries
 - [tracer-2026-08-15.md](./tracer-2026-08-15.md) — Redacted real-Pi evidence for fork membrane acquisition and isolated session enumeration
 - [delivery.md](./delivery.md) — Target-aware companion delivery contract for operational views, logical message handles, target scopes, lifecycle fencing, and leader/follower transport
@@ -16,6 +16,8 @@ Living index of project documentation in `/docs`.
 - [command-templates.md](./command-templates.md) — Portable command-template standard core
 - [inbound.md](./inbound.md) — Local `pi-telegram` inbound text/media handler bus, programmatic inbound handlers, registered STT provider fallbacks, legacy `attachmentHandlers` compatibility, placeholders, and fallbacks
 - [outbound.md](./outbound.md) — Local `pi-telegram` outbound-handler config, text/voice/button behavior, single-artifact Rich results, voice synthesis provider fallback priority, artifact outputs, and callback routing
+- [compact-matrix-literal.md](./compact-matrix-literal.md) — Adaptive Button Literal / CML v3 standard for strict JSON objects, positional cells, optional element commas, mixed bounded-depth matrices, atomic parsing, and renderer-owned width policy
+- [generative-apps.md](./generative-apps.md) — Generative Apps runtime and wire contract for managed `.mjs` identity, inference-bypass bindings, persistent state timelines, bounded adapters, replacement, and lifecycle; agent operation lives in the bundled `generative-apps` Skill
 - [callback-namespaces.md](./callback-namespaces.md) — Shared Telegram `callback_data` namespace standard for layered extensions
 - [updates.md](./updates.md) — Update classification and runtime handler registry that lets layered extensions observe and consume Telegram updates without owning their own polling connection
 - [multi-instance-bus.md](./multi-instance-bus.md) — Optional multi-instance Telegram bus architecture: profile-scoped transport, leader/follower routing, thread targets, instance slots, manual follower registration, and recovery semantics

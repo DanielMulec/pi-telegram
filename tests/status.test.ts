@@ -254,6 +254,18 @@ test("Status bar text renders bridge connection and queue states", () => {
       hasBotToken: true,
       pollingActive: false,
       paired: true,
+      compactionInProgress: false,
+      processing: true,
+      queuedStatus: " +2",
+      error: "Telegram bus follower is not registered.",
+    }),
+    "<accent>telegram</accent> <dim>disconnected</dim><success> +2</success>",
+  );
+  assert.equal(
+    buildTelegramStatusBarText(theme, {
+      hasBotToken: true,
+      pollingActive: false,
+      paired: true,
       busRole: "follower",
       compactionInProgress: false,
       processing: false,
@@ -1202,7 +1214,7 @@ test("Status HTML builder includes extension-provided status lines", () => {
   }
 });
 
-test("Status HTML builder leaves compaction lifecycle to Pi", () => {
+test("Status HTML reports compaction before generic active state", () => {
   const buildStatusHtml = createTelegramStatusHtmlBuilder({
     getActiveModel: () => undefined,
     isCompactionInProgress: () => true,
@@ -1210,11 +1222,11 @@ test("Status HTML builder leaves compaction lifecycle to Pi", () => {
   const html = buildStatusHtml({
     sessionManager: { getEntries: () => [] },
     getContextUsage: () => ({ percent: 0, contextWindow: 1000 }),
-    isIdle: () => true,
+    isIdle: () => false,
+    hasPendingMessages: () => true,
     modelRegistry: { isUsingOAuth: () => false },
   });
-  assert.match(html, /Status.*idle/s);
-  assert.doesNotMatch(html, /compacting/);
+  assert.match(html, /<b>Status:<\/b> <code>compacting<\/code>/u);
 });
 
 test("Runtime event lines render the recent-event ring newest first", () => {

@@ -10,7 +10,6 @@ const TELEGRAM_TYPING_IDLE_DRAIN_MAX_MS = 250;
 export interface TelegramRuntimeQueueCounters {
   nextQueuedTelegramItemOrder: number;
   nextQueuedTelegramControlOrder: number;
-  nextPriorityReactionOrder: number;
 }
 
 export interface TelegramRuntimeLifecycleFlags {
@@ -34,8 +33,6 @@ export interface TelegramRuntimeQueuePort {
   syncCounters: (counters: Partial<TelegramRuntimeQueueCounters>) => void;
   allocateItemOrder: () => number;
   allocateControlOrder: () => number;
-  getNextPriorityReactionOrder: () => number;
-  incrementNextPriorityReactionOrder: () => void;
 }
 
 export interface TelegramRuntimeLifecyclePort {
@@ -85,7 +82,6 @@ export function createTelegramBridgeRuntimeState(): TelegramBridgeRuntimeState {
   return {
     nextQueuedTelegramItemOrder: 0,
     nextQueuedTelegramControlOrder: 0,
-    nextPriorityReactionOrder: 0,
     activeTelegramToolExecutions: 0,
     telegramTurnDispatchPending: false,
     compactionInProgress: false,
@@ -104,10 +100,6 @@ export function createTelegramBridgeRuntime(
         syncTelegramQueueRuntimeCounters(state, counters),
       allocateItemOrder: () => allocateTelegramQueueItemOrder(state),
       allocateControlOrder: () => allocateTelegramQueueControlOrder(state),
-      getNextPriorityReactionOrder: () =>
-        getNextTelegramPriorityReactionOrder(state),
-      incrementNextPriorityReactionOrder: () =>
-        incrementNextTelegramPriorityReactionOrder(state),
     },
     lifecycle: {
       syncFlags: (flags) => syncTelegramLifecycleRuntimeFlags(state, flags),
@@ -159,9 +151,6 @@ export function syncTelegramQueueRuntimeCounters(
     state.nextQueuedTelegramControlOrder =
       counters.nextQueuedTelegramControlOrder;
   }
-  if (counters.nextPriorityReactionOrder !== undefined) {
-    state.nextPriorityReactionOrder = counters.nextPriorityReactionOrder;
-  }
 }
 
 export function allocateTelegramQueueItemOrder(
@@ -174,18 +163,6 @@ export function allocateTelegramQueueControlOrder(
   state: TelegramBridgeRuntimeState,
 ): number {
   return state.nextQueuedTelegramControlOrder++;
-}
-
-export function getNextTelegramPriorityReactionOrder(
-  state: TelegramBridgeRuntimeState,
-): number {
-  return state.nextPriorityReactionOrder;
-}
-
-export function incrementNextTelegramPriorityReactionOrder(
-  state: TelegramBridgeRuntimeState,
-): void {
-  state.nextPriorityReactionOrder += 1;
 }
 
 export function syncTelegramLifecycleRuntimeFlags(
@@ -343,6 +320,8 @@ export interface TelegramTypingLoopDeps {
     options?: { message_thread_id?: number },
   ) => Promise<unknown>;
   sendAggregateTypingAction?: (chatId: number) => Promise<unknown>;
+  shouldContinue?: () => boolean;
+  onStopped?: () => void;
 }
 
 export interface TelegramRuntimeEventRecorderPort {
@@ -388,6 +367,8 @@ export interface TelegramTypingLoopStarterDeps<
   sendAggregateTypingAction?: (chatId: number) => Promise<unknown>;
   updateStatus: (ctx: TContext, error?: string) => void;
   isContextActive?: (ctx: TContext) => boolean;
+  isTransportAvailable?: () => boolean;
+  getTransportAuthority?: () => string | number | undefined;
   intervalMs?: number;
 }
 
@@ -399,15 +380,33 @@ export function createTelegramTypingLoopStarter<TContext>(
   options?: { target?: TelegramTypingLoopTarget },
 ) => void {
   return (ctx, chatId, options) => {
+    const transportAuthority = deps.getTransportAuthority?.();
+    const hasTransport = (): boolean =>
+      deps.getTransportAuthority
+        ? transportAuthority !== undefined &&
+          Object.is(deps.getTransportAuthority(), transportAuthority)
+        : deps.isTransportAvailable?.() !== false;
+    if (!hasTransport()) return;
+    let active = true;
     deps.typing.start({
       chatId: chatId ?? deps.getDefaultChatId(),
       target: options?.target,
       intervalMs: deps.intervalMs ?? TELEGRAM_TYPING_ACTION_INTERVAL_MS,
       sendTypingAction: async (targetChatId, actionOptions) => {
+        if (!active) return;
+        if (!hasTransport()) {
+          deps.typing.stop();
+          return;
+        }
         try {
           await deps.sendTypingAction(targetChatId, actionOptions);
         } catch (error) {
           if (deps.isContextActive?.(ctx) === false) return;
+          if (!active) return;
+          if (!hasTransport()) {
+            deps.typing.stop();
+            return;
+          }
           const message =
             error instanceof Error ? error.message : String(error);
           updateTelegramRuntimeStatusSafely(deps.updateStatus, ctx, {
@@ -427,10 +426,20 @@ export function createTelegramTypingLoopStarter<TContext>(
       },
       sendAggregateTypingAction: deps.sendAggregateTypingAction
         ? async (targetChatId) => {
+            if (!active) return;
+            if (!hasTransport()) {
+              deps.typing.stop();
+              return;
+            }
             try {
               await deps.sendAggregateTypingAction?.(targetChatId);
             } catch (error) {
               if (deps.isContextActive?.(ctx) === false) return;
+              if (!active) return;
+              if (!hasTransport()) {
+                deps.typing.stop();
+                return;
+              }
               const message =
                 error instanceof Error ? error.message : String(error);
               updateTelegramRuntimeStatusSafely(deps.updateStatus, ctx, {
@@ -450,6 +459,10 @@ export function createTelegramTypingLoopStarter<TContext>(
             }
           }
         : undefined,
+      shouldContinue: hasTransport,
+      onStopped: () => {
+        active = false;
+      },
     });
   };
 }
@@ -465,7 +478,12 @@ export function startTelegramTypingLoop(
 ): boolean {
   if (deps.chatId === undefined || deps.chatId === 0) return false;
   const previousKey = state.typingLoopKey;
+  const previousDeps = state.typingLoopDeps;
   const nextKey = getTelegramTypingLoopKey(deps);
+  if (previousDeps && previousDeps !== deps) {
+    previousDeps.onStopped?.();
+    state.typingInFlight = undefined;
+  }
   state.typingLoopDeps = deps;
   state.typingLoopKey = nextKey;
   const sendTyping = (): void => {
@@ -473,10 +491,14 @@ export function startTelegramTypingLoop(
     if (
       !activeDeps ||
       activeDeps.chatId === undefined ||
-      activeDeps.chatId === 0 ||
-      state.typingInFlight
+      activeDeps.chatId === 0
     )
       return;
+    if (activeDeps.shouldContinue?.() === false) {
+      stopTelegramTypingLoop(state);
+      return;
+    }
+    if (state.typingInFlight) return;
     const targetChatId = activeDeps.chatId;
     const threadParams = getTelegramTypingLoopThreadParams(activeDeps.target);
     const typing = Promise.resolve()
@@ -509,9 +531,12 @@ export function stopTelegramTypingLoop(
 ): boolean {
   if (!state.typingInterval) return false;
   clearInterval(state.typingInterval);
+  const activeDeps = state.typingLoopDeps;
   state.typingInterval = undefined;
   state.typingLoopDeps = undefined;
   state.typingLoopKey = undefined;
+  state.typingInFlight = undefined;
+  activeDeps?.onStopped?.();
   return true;
 }
 
@@ -594,6 +619,8 @@ export interface TelegramPromptDispatchRuntimeDeps<
   sendAggregateTypingAction?: (chatId: number) => Promise<unknown>;
   updateStatus: (ctx: TContext, error?: string) => void;
   isContextActive?: (ctx: TContext) => boolean;
+  isTransportAvailable?: () => boolean;
+  getTransportAuthority?: () => string | number | undefined;
   intervalMs?: number;
 }
 

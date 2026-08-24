@@ -321,7 +321,6 @@ export interface TelegramBridgeStatusConfig {
   botToken?: string;
   botUsername?: string;
   allowedUserId?: number;
-  lastUpdateId?: number;
 }
 
 export interface TelegramBridgeStatusRuntimeDeps<
@@ -337,6 +336,7 @@ export interface TelegramBridgeStatusRuntimeDeps<
   isPollingActive: () => boolean;
   getPollingState?: () => TelegramBridgePollingState;
   getInboundWorkerState?: () => TelegramBridgeInboundWorkerState | undefined;
+  getAcceptedThroughUpdateId?: () => number | undefined;
   getActiveSourceMessageIds: () => number[] | undefined;
   hasActiveTurn: () => boolean;
   hasDispatchPending: () => boolean;
@@ -717,7 +717,7 @@ export function createTelegramBridgeStatusRuntime<
         ...(deps.getInboundWorkerState
           ? { inboundWorker: deps.getInboundWorkerState() }
           : {}),
-        lastUpdateId: config.lastUpdateId,
+        lastUpdateId: deps.getAcceptedThroughUpdateId?.(),
         activeSourceMessageIds: deps.getActiveSourceMessageIds(),
         pendingDispatch: deps.hasDispatchPending(),
         compactionInProgress: deps.isCompactionInProgress(),
@@ -871,9 +871,6 @@ export function buildTelegramStatusBarText(
   state: TelegramStatusBarState,
 ): string {
   const label = theme.fg("accent", getTelegramStatusBarLabel(state));
-  if (state.error) {
-    return `${label} ${theme.fg("error", "error")}`;
-  }
   const queued = state.queuedStatus
     ? theme.fg("success", state.queuedStatus)
     : "";
@@ -885,6 +882,9 @@ export function buildTelegramStatusBarText(
     return `${label} ${theme.fg("warning", "electing")}${queued}`;
   if (!state.pollingActive && state.busRole !== "follower")
     return `${theme.fg("accent", "telegram")} ${theme.fg("dim", "disconnected")}${queued}`;
+  if (state.error) {
+    return `${label} ${theme.fg("error", "error")}`;
+  }
   if (state.processing) {
     const processingStatus = state.queuedStatus
       ? "active"
@@ -1505,6 +1505,7 @@ function buildContextSummary(
 }
 
 function buildStatusSummary(ctx: TelegramStatusContext): string {
+  if (ctx.isCompactionInProgress?.()) return "compacting";
   if (ctx.hasPendingMessages?.()) return "pending";
   if (ctx.isIdle?.() === false) return "active";
   if (ctx.isIdle?.() === true) return "idle";

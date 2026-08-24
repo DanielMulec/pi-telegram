@@ -12,7 +12,7 @@ Every completed `assistant-segment` with `placement: "intermediate"` from a Tele
 
 Proactive projection defaults on for local, autonomous, and unclassified extension follow-up Pi work. With `assistant.proactivePush` omitted or set to `true`, every completed public block—including visible commentary/checkpoints and the final answer—is projected to the instance's authorized target in source order; set it explicitly to `false` to opt out of only this local/autonomous projection. Both paths consume normalized complete Activity segments rather than raw token deltas, reasoning, or tool traffic.
 
-Projected blocks use `assistant.rendering` independently of voice policy. Rich mode sends native Rich Markdown and HTML mode keeps the established HTML renderer; projection does not synthesize voice or attach queued files merely because Rich rendering is active. Ordered admission revalidates the exact target, profile/token transport generation, leader epoch or follower registration generation, and session generation before each send. Active-turn final delivery waits for admitted commentary inside its existing background delivery task, preserving commentary-before-final order without blocking Pi lifecycle completion. A `commit-unknown` outcome never permits replay.
+Projected blocks use `assistant.rendering` independently of voice policy. Rich mode sends native Rich Markdown and HTML mode keeps the established HTML renderer; assistant-authored `telegram_button` comments are planned into prompt buttons before either renderer runs, while projection does not synthesize voice or attach queued files merely because Rich rendering is active. Ordered admission revalidates the exact target, profile/token transport generation, leader epoch or follower registration generation, and session generation before each send. Active-turn final delivery waits for admitted commentary inside its existing background delivery task, preserving commentary-before-final order without blocking Pi lifecycle completion. A `commit-unknown` outcome never permits replay.
 
 ## Technical Activity
 
@@ -119,14 +119,13 @@ import { registerTelegramVoiceSynthesisProvider } from "@llblab/pi-telegram/voic
 
 const dispose = registerTelegramVoiceSynthesisProvider(
   async (text, options) => {
-    const audioPath = await synthesizeToOggOpus(text, options);
-    return { audioPath, transcriptText: text };
+    return await synthesizeToOggOpus(text, options);
   },
   { id: "my-extension/tts" },
 );
 ```
 
-Synthesis providers receive the extracted `telegram_voice` text plus optional `lang`/`rate` hints. Stable registrations pass a durable `id`; omitted ids remain a compatibility path for older providers. Providers own translation, TTS, speech rewriting, transcript choice, and OGG/Opus conversion. The bridge validates that the returned file ends in `.ogg` or `.opus`, sends it through Telegram `sendVoice`, and falls back to planned text if delivery fails before any visible text was delivered. Providers run after configured and programmatic voice handlers in the priority chain above.
+Synthesis providers receive the extracted `telegram_voice` text plus optional `lang`/`rate` hints. Stable registrations pass a durable `id`; omitted ids remain a compatibility path for older providers. Providers own translation, TTS, speech rewriting, and OGG/Opus conversion. The bridge validates that the returned file ends in `.ogg` or `.opus`, sends it through Telegram `sendVoice`, and falls back to planned text if delivery fails before any visible text was delivered. Providers run after configured and programmatic voice handlers in the priority chain above.
 
 ## Voice Markup
 
@@ -135,34 +134,40 @@ Assistant replies can include hidden voice actions in either supported payload f
 ```md
 Full text answer stays here.
 
-<!-- telegram_voice: {"value":"Short spoken companion summary.","lang":"ru","rate":"+30%"} -->
+<!-- telegram_voice {"value":"Short spoken companion summary.","lang":"ru","rate":"+30%"} -->
 
 <!-- telegram_voice text="Short spoken companion summary." lang="ru" rate="+30%" -->
 ```
 
-The bridge strips the comment from Telegram text. On `agent_end`, it maps each `telegram_voice` action to a provider call, generates one file per action, and sends each file as an independent Telegram-native voice message. Equivalent `text` or `value` supplies the spoken payload, with explicit `text` taking precedence when both appear; `lang` and `rate` are optional. The colon after `telegram_voice` is optional for both JSON and attributes and never changes format detection. Use JSON for long or escaped text and encode line breaks inside JSON strings as `\n`. The opening marker must start at column zero on a top-level line outside fenced code, quotes, lists, and indented examples; otherwise it remains literal Markdown.
+The bridge strips the comment from Telegram text. On `agent_end`, it maps each `telegram_voice` action to a provider call, generates one file per action, and sends each file as an independent Telegram-native voice message. Equivalent `text` or `value` supplies the spoken payload, with explicit `text` taking precedence when both appear; `lang` and `rate` are optional. A colon after `telegram_voice` is rejected so both payload forms share one unambiguous action marker. Use JSON for long or escaped text and encode line breaks inside JSON strings as `\n`. The opening marker must start at column zero on a top-level line outside fenced code, quotes, lists, and indented examples; otherwise it remains literal Markdown.
 
 ## Buttons Markup
 
-Assistant replies can include independent button actions in the same two payload forms:
+Assistant replies can include one or many button actions through one colon-free marker:
 
 ```md
 I can continue.
 
-<!-- telegram_button: {"label":"Continue","prompt":"Continue with the current plan.","selected_style":"primary"} -->
+<!-- telegram_button {"label":"Continue","prompt":"Continue with the current plan.","selected_style":"primary"} -->
 
 <!-- telegram_button label="Show risks" prompt="List the main risks first." selected_style="danger" -->
 
-<!-- telegram_button: {"value":"Done"} -->
+<!-- telegram_button {"value":"Done"} -->
+
+<!-- telegram_button [{"label":"⬆️ Up","prompt":"/"},[{"value":"⬅️ Previous"},{"value":"➡️ Next"}],{"label":"📁 etc","prompt":"/etc"}] -->
+
+<!-- telegram_buttons [[{"value":"Approve"},{"value":"Reject"}]] -->
+
+<!-- telegram_button [{⬆️ Up|/}[{⬅️|page-1}{➡️|page-3}]{📁 etc|/etc}] -->
 ```
 
 Rules:
 
-- JSON objects and double-quoted HTML-like attributes are the only accepted payload forms; shorthand, body, paired-comment, unquoted-attribute, and single-quoted-attribute forms are rejected.
-- The colon after `telegram_button` is optional for both forms and never changes format detection.
+- `telegram_button` accepts a JSON object, adaptive JSON/CML matrix, positional [Compact Matrix Literal](./compact-matrix-literal.md), or double-quoted HTML-like attributes; `telegram_buttons` is an exact plural alias. Named JSON objects and positional cells may coexist in one matrix or row, and commas are optional only between completed elements while JSON object internals remain strict. CML uses `{value}`, `{label|prompt}`, or `{label|prompt|selected_style}`; the optional third atom requires a prompt and accepts only `primary`, `success`, or `danger`. It trims every atom, preserves non-structural printable text, and decodes only `\|`, `\}`, and `\\`. Shorthand, body, paired-comment, unquoted-attribute, and single-quoted-attribute forms are rejected.
+- A colon after either button marker is rejected so every payload form shares one unambiguous action marker.
 - Use `label` plus `prompt`, or the compact `value` key when both strings are identical. Explicit `label` or `prompt` takes precedence over its `value` fallback. Use JSON with `\n` escapes for multiline prompts.
 - The opening marker must start at column zero on a top-level line outside fenced code, quotes, lists, and indented examples; otherwise it remains literal Markdown.
-- Use one comment per button; this mirrors HTML's singular element model and avoids a nested button DSL.
+- Prefer one matrix comment for multiple buttons. Each top-level JSON object or CML cell becomes one full-width inline-keyboard row in source order; a nested row groups one or more buttons horizontally. The parser imposes no artificial per-row width cap; empty rows, malformed cells, unknown/trailing CML escapes, a third unescaped CML separator, empty atoms, unknown selected styles, and deeper nesting are rejected atomically. Generated surfaces default to five columns and expand to six through eight only for short position-bearing labels. Repeated singular comments remain valid.
 - Button actions are stored in memory with short `callback_data`; Telegram never sees the full prompt in the button payload.
 - After Telegram accepts a generated button callback as a queued prompt, the bridge changes that exact button to its configured selection style without changing agent-authored text or emoji. Set `selected_style` to `primary` (blue), `success` (green), or `danger` (red); omitted or invalid values fall back to `primary`. The style never suppresses queue admission. Other choices stay visually unchanged and remain available; the callback acknowledgement remains the fallback on clients that do not render button styles.
 - When generated button markup is the entire assistant reply, the bridge supplies the standard `☑️ **Choose an option:**` heading as visible message text so Telegram has a message to which it can attach the inline keyboard.
@@ -176,11 +181,11 @@ Buttons are built in and do not need a command template because they are pure Te
 The extension injects prompt guidance by context:
 
 - If no bot token is configured, no Telegram bridge suffix is injected.
-- For ordinary local/TUI prompts, the agent only sees compact direct-delivery guidance: use `telegram_attach` or `telegram_message` when the user asks to send something to Telegram, and otherwise answer locally as normal.
-- For Telegram-originated turns, the prompt carries only minimal mobile/reply/file guidance; agents can call `telegram_help()` for full voice/button/direct-delivery/Threaded Mode/formatting/debug details.
+- For ordinary local/TUI prompts, the compact routing note points to the bundled `telegram-bridge` Skill and forbids Telegram use unless explicitly requested.
+- For Telegram-originated turns, the compact note routes the agent to `telegram-bridge`, which owns voice/button/direct-delivery/Threaded Mode/formatting/debug guidance.
 - For Telegram-originated turns, write the full technical answer as normal Markdown.
 - Add `telegram_voice` with either a JSON object or double-quoted attributes when a Telegram-native voice message is useful. A companion summary is optional, no specific summary format is required.
-- Add `telegram_button` with either a JSON object or double-quoted attributes. Use `label` plus `prompt`, or `value` when they are identical; `selected_style` is optional. A button-only reply may omit parent text because the bridge supplies `☑️ **Choose an option:**` automatically.
+- Add `telegram_button` with a JSON object, JSON matrix, or double-quoted attributes; `telegram_buttons` is an alias. Prefer one array for multiple controls. Use `label` plus `prompt`, or `value` when they are identical; `selected_style` is optional. A button-only reply may omit parent text because the bridge supplies `☑️ **Choose an option:**` automatically.
 - For ordinary Telegram-turn replies, do not call transport tools for voice or buttons; the bridge owns delivery, while registered voice synthesis providers own TTS and OGG/Opus conversion. For explicit local/TUI direct sends, `telegram_message` may include top-level `telegram_button` comments in its Markdown text because those buttons are attached to that text message.
 - Prefer meaningful visible parent text when it adds context; for a button-only answer, rely on the bridge's automatic `☑️ **Choose an option:**` fallback rather than manufacturing duplicate text.
 

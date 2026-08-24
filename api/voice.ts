@@ -9,7 +9,6 @@ export {
   computeVoicePromptContribution,
   computeVoiceTurnFlags,
   getTelegramVoiceReplyMode,
-  getTelegramVoiceSendTranscript,
   isVoiceTurn,
   registerTelegramVoiceSynthesisProvider,
   registerTelegramVoiceTranscriptionProvider,

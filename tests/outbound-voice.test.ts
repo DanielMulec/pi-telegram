@@ -17,9 +17,9 @@ test.beforeEach(() => {
   clearTelegramVoiceSynthesisProviders();
 });
 
-test("Outbound voice sender uploads provider opus result with reply markup and transcript", async () => {
+test("Outbound voice sender uploads provider opus result with reply markup", async () => {
   registerTelegramVoiceSynthesisProvider(
-    async () => ({ audioPath: "/tmp/direct.opus", transcriptText: "spoken" }),
+    async () => "/tmp/direct.opus",
     { id: "direct-test" },
   );
   const uploads: unknown[] = [];
@@ -50,7 +50,6 @@ test("Outbound voice sender uploads provider opus result with reply markup and t
       "sendVoice",
       {
         chat_id: "1",
-        caption: "spoken",
         reply_parameters: JSON.stringify({
           message_id: 2,
           allow_sending_without_reply: true,

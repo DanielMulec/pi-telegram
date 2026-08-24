@@ -388,6 +388,10 @@ export function formatTelegramCommandEmojiPrefix(
   return `${getTelegramCommandEmoji(command)} `;
 }
 
+export const TELEGRAM_COMPACTION_STARTED_TEXT =
+  `${formatTelegramCommandEmojiPrefix("compact")}Compaction started.`;
+export const TELEGRAM_COMPACTION_COMPLETED_TEXT = "✅ Compaction completed.";
+
 function formatTelegramBotCommandDescription(
   command: TelegramCommandEmojiName,
   description: string,
@@ -533,6 +537,7 @@ export interface TelegramBridgeCommandRegistrationDeps {
     error: unknown,
   ) => Promise<TelegramPollingStartRecoveryResult>;
   getDisconnectThreadName?: () => string | undefined;
+  queueAgentConnectionContext?: (connected: boolean) => void;
   updateStatus: (ctx: ExtensionCommandContext) => void;
   getProfileNames?: () => string[];
   activateDefaultProfileConfig?: (ctx: ExtensionCommandContext) => Promise<void>;
@@ -667,6 +672,9 @@ export function registerTelegramBridgeCommands(
       if (result?.message) {
         ctx.ui.notify(result.message, result.ok ? "info" : "warning");
       }
+      if (!result || result.ok) {
+        deps.queueAgentConnectionContext?.(true);
+      }
       deps.updateStatus(ctx);
     },
   });
@@ -689,6 +697,7 @@ export function registerTelegramBridgeCommands(
       try {
         const message = await deps.stopPolling();
         if (message) ctx.ui.notify(message, "info");
+        deps.queueAgentConnectionContext?.(false);
       } catch (error) {
         const detail = error instanceof Error ? error.message : String(error);
         ctx.ui.notify(
@@ -919,7 +928,10 @@ export interface TelegramCommandTargetRuntimeDeps<TContext> {
     chatId: number,
     replyToMessageId: number,
     text: string,
-    options?: { target?: { chatId: number; threadId?: number } },
+    options?: {
+      parseMode?: "HTML";
+      target?: { chatId: number; threadId?: number };
+    },
   ) => Promise<unknown>;
 }
 
@@ -937,7 +949,11 @@ export interface TelegramCommandTargetRuntime<
   showStatus: (message: TMessage, ctx: TContext) => Promise<void>;
   openModelMenu: (message: TMessage, ctx: TContext) => Promise<void>;
   openSettingsMenu: (message: TMessage, ctx: TContext) => Promise<void>;
-  sendTextReply: (message: TMessage, text: string) => Promise<void>;
+  sendTextReply: (
+    message: TMessage,
+    text: string,
+    options?: { parseMode?: "HTML" },
+  ) => Promise<void>;
 }
 
 export function getTelegramCommandMessageTarget(
@@ -1120,9 +1136,10 @@ export function createTelegramCommandTargetRuntime<
         target.threadId,
       );
     },
-    sendTextReply: async (message, text) => {
+    sendTextReply: async (message, text, options) => {
       const target = getTelegramCommandMessageTarget(message);
       await deps.sendTextReply(target.chatId, target.replyToMessageId, text, {
+        ...options,
         target,
       });
     },
@@ -1205,7 +1222,11 @@ export interface TelegramCommandRuntimeDeps<
   registerBotCommands: () => Promise<void>;
   getPromptTemplateCommands?: () => readonly TelegramPromptTemplateMenuCommand[];
   persistConfig: () => Promise<void>;
-  sendTextReply: (message: TMessage, text: string) => Promise<void>;
+  sendTextReply: (
+    message: TMessage,
+    text: string,
+    options?: { parseMode?: "HTML" },
+  ) => Promise<void>;
   sendInteractiveMessage?: TelegramCompactConfirmationDeps["sendInteractiveMessage"];
   assertExecutionCurrent?: (message: TMessage) => void;
 }
@@ -1388,11 +1409,14 @@ export async function handleTelegramNextCommand(deps: {
   dispatchNextQueuedTurn: () => void;
   clearFoldForDispatch: () => void;
   updateStatus: () => void;
-  sendTextReply: (text: string) => Promise<void>;
+  sendTextReply: (
+    text: string,
+    options?: { parseMode?: "HTML" },
+  ) => Promise<void>;
 }): Promise<void> {
   deps.clearPendingModelSwitch();
   if (!deps.hasQueuedItems()) {
-    await deps.sendTextReply("<b>Queue is empty.</b>");
+    await deps.sendTextReply("<b>Queue is empty.</b>", { parseMode: "HTML" });
     return;
   }
   if (!deps.isIdle() && deps.hasAbortHandler()) {
@@ -1497,7 +1521,7 @@ export async function handleTelegramCompactConfirmationCallback<TContext>(
   await deps.editInteractiveMessage(
     chatId,
     messageId,
-    `${formatTelegramCommandEmojiPrefix("compact")}Compaction started.`,
+    TELEGRAM_COMPACTION_STARTED_TEXT,
     "plain",
     { inline_keyboard: [] },
   );
@@ -1538,7 +1562,7 @@ export async function handleTelegramCompactCommand(
         deps.setCompactionInProgress(false);
         deps.updateStatus();
         dispatchNextQueuedTelegramTurnAfterCompact(deps);
-        void deps.sendTextReply("✅ Compaction completed.");
+        void deps.sendTextReply(TELEGRAM_COMPACTION_COMPLETED_TEXT);
       },
       onError: (error) => {
         deps.stopTypingLoop?.();
@@ -1561,7 +1585,7 @@ export async function handleTelegramCompactCommand(
   }
   if (!deps.suppressStartNotice) {
     await deps.sendTextReply(
-      `${formatTelegramCommandEmojiPrefix("compact")}Compaction started.`,
+      TELEGRAM_COMPACTION_STARTED_TEXT,
     );
   }
 }
@@ -1834,11 +1858,13 @@ async function handleTelegramCommandRuntime<
 ): Promise<boolean> {
   const assertExecutionCurrentFor = (nextMessage: TMessage) => (): void =>
     deps.assertExecutionCurrent?.(nextMessage);
-  const sendReplyFor = (nextMessage: TMessage) => async (text: string) => {
-    deps.assertExecutionCurrent?.(nextMessage);
-    await deps.sendTextReply(nextMessage, text);
-    deps.assertExecutionCurrent?.(nextMessage);
-  };
+  const sendReplyFor =
+    (nextMessage: TMessage) =>
+    async (text: string, options?: { parseMode?: "HTML" }) => {
+      deps.assertExecutionCurrent?.(nextMessage);
+      await deps.sendTextReply(nextMessage, text, options);
+      deps.assertExecutionCurrent?.(nextMessage);
+    };
   const updateStatusFor = (commandCtx: TContext) => () =>
     deps.updateStatus(commandCtx);
   return executeTelegramCommandAction(

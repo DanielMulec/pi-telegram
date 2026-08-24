@@ -21,6 +21,7 @@ import type {
 import {
   planTelegramButtonReply,
   type TelegramButtonActionStore,
+  type TelegramOutboundButtonBinding,
   type TelegramOutboundButtonMarkup,
 } from "./outbound-buttons.ts";
 import {
@@ -824,6 +825,7 @@ export {
   type TelegramButtonCallbackQuery,
   type TelegramButtonReplyPlan,
   type TelegramOutboundButtonAction,
+  type TelegramOutboundButtonBinding,
   type TelegramOutboundButtonMarkup,
   type TelegramOutboundButtonStoredAction,
 } from "./outbound-buttons.ts";
@@ -832,10 +834,12 @@ export function createTelegramOutboundReplyPlanner(
   store: Pick<TelegramButtonActionStore, "register">,
 ): (
   markdown: string,
+  options?: { binding?: TelegramOutboundButtonBinding },
 ) => TelegramOutboundReplyPlan<TelegramOutboundButtonMarkup> {
-  return (markdown) => {
+  return (markdown, options) => {
     const buttonReply = planTelegramButtonReply(markdown, {
       registerAction: store.register,
+      ...(options?.binding ? { binding: options.binding } : {}),
     });
 
     // Button replies can also contain <!-- telegram_voice --> markup
@@ -954,6 +958,10 @@ export function createTelegramAssistantOutputSender<
   ) => Promise<TelegramSentMessage>;
   editMessage: (body: TelegramEditMessageTextBody) => Promise<unknown>;
   getAssistantRenderingMode: () => "rich" | "html";
+  planButtonReply?: (markdown: string) => {
+    markdown: string;
+    replyMarkup?: TReplyMarkup;
+  };
   execCommand: TelegramOutboundTextReplyRuntimeDeps<TReplyMarkup>["execCommand"];
   getHandlers?: TelegramOutboundTextReplyRuntimeDeps<TReplyMarkup>["getHandlers"];
   recordRuntimeEvent?: TelegramOutboundTextReplyRuntimeDeps<TReplyMarkup>["recordRuntimeEvent"];
@@ -993,11 +1001,19 @@ export function createTelegramAssistantOutputSender<
       getHandlers: deps.getHandlers,
       recordRuntimeEvent: deps.recordRuntimeEvent,
     });
+    const buttonReply = deps.planButtonReply?.(event.text) ?? {
+      markdown: event.text,
+    };
     await outboundRuntime.sendMarkdownReply(
       target.chatId,
       undefined,
-      event.text,
-      { target },
+      buttonReply.markdown,
+      {
+        target,
+        ...(buttonReply.replyMarkup
+          ? { replyMarkup: buttonReply.replyMarkup }
+          : {}),
+      },
     );
   };
 }

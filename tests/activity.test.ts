@@ -25,6 +25,8 @@ import {
 import {
   createTelegramAssistantOutputMutationFence,
   createTelegramAssistantOutputSender,
+  createTelegramButtonActionStore,
+  createTelegramButtonReplyPlanner,
 } from "../lib/outbound.ts";
 import type { TelegramBridgeApiRuntime } from "../lib/telegram-api.ts";
 
@@ -736,6 +738,61 @@ test("Assistant output mutation fence rejects replaced authority", async () => {
     /lost admission authority before transport mutation/,
   );
   assert.deepEqual(calls, []);
+});
+
+test("Assistant output projection plans prompt buttons before proactive delivery", async () => {
+  const sent: Array<Record<string, unknown>> = [];
+  const buttonStore = createTelegramButtonActionStore();
+  const send = createTelegramAssistantOutputSender<string>({
+    sendMessage: async (body) => {
+      sent.push(body);
+      return { message_id: 1 };
+    },
+    sendRichMessage: async (body) => {
+      sent.push(body);
+      return { message_id: 2 };
+    },
+    editMessage: async () => "edited",
+    getAssistantRenderingMode: () => "rich",
+    planButtonReply: createTelegramButtonReplyPlanner(buttonStore),
+    execCommand: async () => ({
+      stdout: "",
+      stderr: "",
+      code: 0,
+      killed: false,
+    }),
+  });
+
+  await send(
+    assistantSegment(1, {
+      text: [
+        "Ready.",
+        "",
+        "<!-- telegram_button {Continue|Continue the workflow.} -->",
+      ].join("\n"),
+    }),
+    {
+      transportStamp: "stamp-1",
+      route: "direct",
+      directEpoch: 1,
+      target: { chatId: 10, threadId: 42 },
+    },
+    () => true,
+  );
+
+  assert.equal(sent.length, 1);
+  assert.deepEqual(sent[0]?.rich_message, {
+    markdown: "Ready.",
+    skip_entity_detection: true,
+  });
+  const replyMarkup = sent[0]?.reply_markup as {
+    inline_keyboard: Array<Array<{ text: string; callback_data: string }>>;
+  };
+  assert.equal(replyMarkup.inline_keyboard[0]?.[0]?.text, "Continue");
+  assert.match(
+    replyMarkup.inline_keyboard[0]?.[0]?.callback_data ?? "",
+    /^tgbtn:/u,
+  );
 });
 
 test("Assistant output Rich and HTML senders fence after async transformation", async () => {

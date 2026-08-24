@@ -26,6 +26,7 @@ import * as Setup from "./setup.ts";
 import * as Status from "./status.ts";
 import * as TelegramApi from "./telegram-api.ts";
 import type { TelegramTarget } from "./target.ts";
+import * as GenerativeApps from "./generative-apps.ts";
 
 type ActivePiModel = NonNullable<Pi.ExtensionContext["model"]>;
 
@@ -53,10 +54,7 @@ export interface TelegramQueueBindingRuntime<TContext> {
 
 export function createTelegramQueueBindingRuntime<TContext>(deps: {
   store: Queue.TelegramQueueStateStore<TContext>;
-  queue: Pick<
-    Runtime.TelegramBridgeRuntime["queue"],
-    "getNextPriorityReactionOrder" | "incrementNextPriorityReactionOrder"
-  >;
+  queue: Pick<Runtime.TelegramBridgeRuntime["queue"], "allocateItemOrder">;
   lifecycle: Pick<
     Runtime.TelegramBridgeRuntime["lifecycle"],
     "isCompactionInProgress" | "hasDispatchPending"
@@ -70,6 +68,10 @@ export function createTelegramQueueBindingRuntime<TContext>(deps: {
             ctx: TContext,
           ) => void;
           isItemReady: (item: Queue.TelegramQueueItem<TContext>) => boolean;
+          onPromptHandedOff?: (
+            item: Queue.PendingTelegramTurn,
+            ctx: TContext,
+          ) => void;
           onControlSettled: (
             item: Queue.PendingTelegramControlItem<TContext>,
             ctx: TContext,
@@ -95,9 +97,7 @@ export function createTelegramQueueBindingRuntime<TContext>(deps: {
 }): TelegramQueueBindingRuntime<TContext> {
   const mutation = Queue.createTelegramQueueMutationController({
     ...deps.store,
-    getNextPriorityReactionOrder: deps.queue.getNextPriorityReactionOrder,
-    incrementNextPriorityReactionOrder:
-      deps.queue.incrementNextPriorityReactionOrder,
+    allocateLaneOrder: deps.queue.allocateItemOrder,
     onItemsDiscarded(items, ctx) {
       deps.admission.getSettlement()?.onItemsDiscarded(items, ctx);
     },
@@ -126,6 +126,13 @@ export function createTelegramQueueBindingRuntime<TContext>(deps: {
         (item.admissionReceipts?.length ?? 0) === 0
       );
     },
+    commitPromptDispatch(item, ctx) {
+      if ((item.admissionReceipts?.length ?? 0) === 0) return true;
+      const settlement = deps.admission.getSettlement();
+      if (!settlement?.onPromptHandedOff) return false;
+      settlement.onPromptHandedOff(item, ctx);
+      return !settlement.isItemReady(item);
+    },
     onControlSettled(item, ctx) {
       deps.admission.getSettlement()?.onControlSettled(item, ctx);
     },
@@ -143,6 +150,108 @@ export function createTelegramQueueBindingRuntime<TContext>(deps: {
       dispatchNextQueuedTelegramTurn: dispatchNext,
       recordRuntimeEvent: deps.recordRuntimeEvent,
     }),
+  };
+}
+
+export function createTelegramGenerativeAppBoundButtonActionInvoker<
+  TQuery extends {
+    message?: { chat?: { id?: number }; message_id?: number };
+  },
+>(deps: {
+  agentDir: string;
+  assertExecutionCurrent: (query: TQuery) => void;
+  getExecutionFence: (query: TQuery) => GenerativeApps.GenerativeAppExecutionFence | undefined;
+  planOutput: ReturnType<typeof OutboundHandlers.createTelegramOutboundReplyPlanner>;
+  sendMarkdownReply: (
+    chatId: number,
+    replyToMessageId: number,
+    markdown: string,
+    options?: { replyMarkup?: OutboundHandlers.TelegramOutboundButtonMarkup },
+  ) => Promise<unknown>;
+  editInteractiveMessage?: (
+    chatId: number,
+    messageId: number,
+    markdown: string,
+    mode: "markdown",
+    replyMarkup: OutboundHandlers.TelegramOutboundButtonMarkup,
+  ) => Promise<void>;
+  recordRuntimeEvent: TelegramRuntimeEventRecorder;
+}): (
+  action: OutboundHandlers.TelegramOutboundButtonAction,
+  query: TQuery,
+) => Promise<false | "new" | "edit"> {
+  return async (action, query) => {
+    let boundAction: GenerativeApps.GenerativeAppBoundAction | undefined;
+    try {
+      boundAction = GenerativeApps.parseGenerativeAppBoundAction(action.prompt);
+      if (!boundAction) return false;
+      deps.assertExecutionCurrent(query);
+      const result = await GenerativeApps.invokeGenerativeApp({
+        agentDir: deps.agentDir,
+        ...(deps.getExecutionFence(query)
+          ? { execution: deps.getExecutionFence(query) }
+          : {}),
+        ...(boundAction.argument !== undefined
+          ? { argument: boundAction.argument }
+          : {}),
+        ...(action.binding?.app === boundAction.app
+          ? {
+              expectedGeneration: action.binding.generation,
+              expectedRevision: action.binding.revision,
+            }
+          : {}),
+        method: boundAction.method,
+        app: boundAction.app,
+      });
+      deps.assertExecutionCurrent(query);
+      const chatId = query.message?.chat?.id;
+      const messageId = query.message?.message_id;
+      if (typeof chatId !== "number" || typeof messageId !== "number") {
+        throw new Error("Generative App callback target is unavailable.");
+      }
+      const reply = deps.planOutput(result.output, {
+        binding: {
+          generation: result.generation,
+          app: result.app,
+          revision: result.revision,
+        },
+      });
+      if (result.viewMode === "edit" && deps.editInteractiveMessage) {
+        let editFailed = false;
+        try {
+          await deps.editInteractiveMessage(
+            chatId,
+            messageId,
+            reply.markdown,
+            "markdown",
+            reply.replyMarkup ?? { inline_keyboard: [] },
+          );
+        } catch (error) {
+          editFailed = true;
+          deps.recordRuntimeEvent("generative-app", error, {
+            phase: "bound-action-edit-fallback",
+            app: boundAction.app,
+            method: boundAction.method,
+          });
+        }
+        deps.assertExecutionCurrent(query);
+        if (!editFailed) return "edit";
+      }
+      deps.assertExecutionCurrent(query);
+      await deps.sendMarkdownReply(chatId, messageId, reply.markdown, {
+        replyMarkup: reply.replyMarkup,
+      });
+      deps.assertExecutionCurrent(query);
+      return "new";
+    } catch (error) {
+      deps.recordRuntimeEvent("generative-app", error, {
+        phase: "bound-action",
+        ...(boundAction
+          ? { app: boundAction.app, method: boundAction.method }
+          : {}),
+      });
+      throw error;
+    }
   };
 }
 
@@ -331,6 +440,7 @@ export function createTelegramActivityBindingRuntime<TTransportStamp>(deps: {
 
 interface TelegramCommandsAndToolsBindingDeps {
   pi: Pi.ExtensionAPI;
+  agentDir: string;
   configStore: Config.TelegramConfigStore;
   persistConfig: (config?: Config.TelegramConfig) => Promise<void>;
   setup: Setup.TelegramSetupGuard;
@@ -348,7 +458,10 @@ interface TelegramCommandsAndToolsBindingDeps {
     chatId: number,
     replyToMessageId: number | undefined,
     markdown: string,
-    options?: { replyMarkup?: unknown },
+    options?: {
+      replyMarkup?: unknown;
+      target?: { chatId: number; threadId?: number };
+    },
   ) => Promise<number | undefined>;
   callMultipart: OutboundHandlers.TelegramVoiceReplySenderDeps["sendMultipart"];
   getDefaultChatId: () => number | undefined;
@@ -362,6 +475,7 @@ interface TelegramCommandsAndToolsBindingDeps {
 
 export function registerTelegramCommandsAndTools({
   pi,
+  agentDir,
   configStore,
   persistConfig,
   setup,
@@ -383,6 +497,13 @@ export function registerTelegramCommandsAndTools({
   recordRuntimeEvent,
   updateStatus,
 }: TelegramCommandsAndToolsBindingDeps): void {
+  GenerativeApps.registerTelegramBindTool(pi, {
+    agentDir,
+    getActiveTurn: activeTurnRuntime.get,
+    planOutput: OutboundHandlers.createTelegramOutboundReplyPlanner(buttonActionStore),
+    sendMarkdownReply,
+    recordRuntimeEvent,
+  });
   OutboundAttachments.registerTelegramOutboundAttachmentTool(pi, {
     getActiveTurn: activeTurnRuntime.get,
     getDefaultChatId,
@@ -404,9 +525,18 @@ export function registerTelegramCommandsAndTools({
       sendMarkdownReply(chatId, undefined, markdown, options),
     recordRuntimeEvent,
   });
-  Prompts.registerTelegramHelpTool(pi, {
-    getActiveProfileName: configStore.getActiveProfileName,
-  });
+  const queueAgentConnectionContext = (connected: boolean): void => {
+    pi.sendMessage(
+      {
+        customType: "telegram-connection-state",
+        content: connected
+          ? Prompts.TELEGRAM_CONNECTED_CONTEXT_MESSAGE
+          : Prompts.TELEGRAM_DISCONNECTED_CONTEXT_MESSAGE,
+        display: false,
+      },
+      { deliverAs: "nextTurn" },
+    );
+  };
   Commands.registerTelegramBridgeCommands(pi, {
     promptForConfig: async (ctx, profileName) => {
       const nextProfileName = profileName ?? undefined;
@@ -474,8 +604,11 @@ export function registerTelegramCommandsAndTools({
         recordRuntimeEvent,
       });
       const completion = await runSetup(ctx);
-      if (profileName && completion.status === "success") {
-        ctx.ui.notify(`Profile "${profileName}" saved and connected.`, "info");
+      if (completion.status === "success") {
+        queueAgentConnectionContext(true);
+        if (profileName) {
+          ctx.ui.notify(`Profile "${profileName}" saved and connected.`, "info");
+        }
       }
     },
     getStatusLines,
@@ -492,6 +625,7 @@ export function registerTelegramCommandsAndTools({
     stopPolling: stopPolling ?? lockedPollingRuntime.stop,
     recoverPollingStart,
     getDisconnectThreadName,
+    queueAgentConnectionContext,
     updateStatus,
     getProfileNames: () =>
       Config.getTelegramProfileNames(configStore.getStoredConfig()),
@@ -863,6 +997,21 @@ export function registerTelegramLifecycleRuntimeHooks({
       target: turn?.target,
     });
   };
+  let observedAutomaticCompaction = false;
+  const sendCompactionNotice = async (text: string): Promise<void> => {
+    const turn = activeTurnRuntime.get();
+    const target = turn?.target ?? proactivePushTargetGetter?.();
+    if (!target) return;
+    try {
+      await sendMarkdownReply(target.chatId, turn?.replyToMessageId, text, {
+        target,
+      });
+    } catch (error) {
+      recordRuntimeEvent("delivery", error, {
+        phase: "compaction-notice",
+      });
+    }
+  };
   const compactionObserver = Lifecycle.createTelegramCompactionObserverRuntime({
     isContextActive: isSessionContextActive,
     setCompactionInProgress: lifecycle.setCompactionInProgress,
@@ -873,7 +1022,10 @@ export function registerTelegramLifecycleRuntimeHooks({
       deferredQueueDispatchRuntime.request,
     dispatchNextQueuedTelegramTurn,
     recordRuntimeEvent,
-    onCompactionAbandoned: activityRuntime.onCompactionAbandoned,
+    onCompactionAbandoned: () => {
+      observedAutomaticCompaction = false;
+      activityRuntime.onCompactionAbandoned();
+    },
   });
   const messageActivityTypingHooks =
     Lifecycle.createTelegramMessageActivityTypingHooks({
@@ -905,6 +1057,7 @@ export function registerTelegramLifecycleRuntimeHooks({
       activityRuntime.onSessionShutdown();
       activityVerbosityRuntime?.reset();
       assistantOutputRuntime.stop();
+      observedAutomaticCompaction = false;
       compactionObserver.onSessionShutdown();
       if (event.reason === "quit" && disconnectOnQuit) {
         try {
@@ -919,15 +1072,24 @@ export function registerTelegramLifecycleRuntimeHooks({
       }
       await sessionLifecycleRuntime.onSessionShutdown(event, ctx);
     },
-    onSessionBeforeCompact(event, ctx) {
+    async onSessionBeforeCompact(event, ctx) {
       if (!isSessionContextActive(ctx)) return;
+      const shouldNotify = !(lifecycle.isCompactionInProgress?.() ?? false);
+      if (shouldNotify) observedAutomaticCompaction = true;
       activityRuntime.onCompactionStart(Pi.getSessionCompactionReason(event));
       compactionObserver.onSessionBeforeCompact(event, ctx);
+      if (shouldNotify) {
+        await sendCompactionNotice(Commands.TELEGRAM_COMPACTION_STARTED_TEXT);
+      }
     },
-    onSessionCompact(event, ctx) {
+    async onSessionCompact(event, ctx) {
       if (!isSessionContextActive(ctx)) return;
       activityRuntime.onCompactionEnd(Pi.getSessionCompactionReason(event));
       compactionObserver.onSessionCompact(event, ctx);
+      if (observedAutomaticCompaction) {
+        observedAutomaticCompaction = false;
+        await sendCompactionNotice(Commands.TELEGRAM_COMPACTION_COMPLETED_TEXT);
+      }
     },
     async onAgentStart(event, ctx) {
       if (!isSessionContextActive(ctx)) return;

@@ -19,6 +19,7 @@ import {
   hasExtensionContextPendingMessages,
   isExtensionContextIdle,
   isExtensionContextPassiveRunMode,
+  normalizeSettingsManager,
 } from "../lib/pi.ts";
 
 type PiRuntimeApiHarness = Parameters<
@@ -102,7 +103,7 @@ test("Pi API runtime ports bind methods without losing receiver context", async 
   assert.equal(runtime.getThinkingLevel(), "high");
   runtime.setThinkingLevel("low");
   assert.deepEqual(runtime.getActiveTools(), ["read"]);
-  runtime.setActiveTools(["read", "telegram_help"]);
+  runtime.setActiveTools(["read", "telegram_attach"]);
   assert.equal(await runtime.setModel(createHarnessModel("gpt-5")), true);
   assert.deepEqual(api.events, [
     "send:hello:followUp",
@@ -111,15 +112,54 @@ test("Pi API runtime ports bind methods without losing receiver context", async 
     "get-thinking",
     "thinking:low",
     "get-tools",
-    "set-tools:read,telegram_help",
+    "set-tools:read,telegram_attach",
     "model:gpt-5",
+  ]);
+});
+
+test("Pi settings adapter preserves legacy and generic host capabilities", async () => {
+  const legacyEvents: string[] = [];
+  const legacy = normalizeSettingsManager({
+    reload: async () => legacyEvents.push("reload"),
+    flush: async () => legacyEvents.push("flush"),
+    getEnabledModels: () => ["openai/gpt-5"],
+    setEnabledModels: (patterns: string[] | undefined) =>
+      legacyEvents.push(`set:${patterns?.join(",") ?? "all"}`),
+  });
+  await legacy.reload();
+  assert.deepEqual(legacy.getEnabledModels(), ["openai/gpt-5"]);
+  legacy.setEnabledModels(undefined);
+  await legacy.flush();
+  assert.deepEqual(legacyEvents, ["reload", "set:all", "flush"]);
+
+  const genericEvents: string[] = [];
+  let enabledModels = ["anthropic/claude-sonnet-4"];
+  const generic = normalizeSettingsManager({
+    get: (key: string) => {
+      genericEvents.push(`get:${key}`);
+      return enabledModels;
+    },
+    set: (key: string, value: unknown) => {
+      genericEvents.push(`set:${key}:${JSON.stringify(value)}`);
+      enabledModels = value as string[];
+    },
+    flush: async () => genericEvents.push("flush"),
+  });
+  await generic.reload();
+  assert.deepEqual(generic.getEnabledModels(), ["anthropic/claude-sonnet-4"]);
+  generic.setEnabledModels(undefined);
+  await generic.flush();
+  assert.deepEqual(genericEvents, [
+    "get:enabledModels",
+    "set:enabledModels:[]",
+    "flush",
   ]);
 });
 
 test("Pi scoped model persister invalidates cached inputs without clearing live menus", async () => {
   const events: string[] = [];
   const persist = createScopedModelPatternPersister({
-    createSettingsManager: (cwd) => ({
+    createSettingsManager: async (cwd) => ({
       reload: async () => {},
       flush: async () => {
         events.push("flush");

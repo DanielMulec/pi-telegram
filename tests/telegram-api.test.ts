@@ -538,22 +538,35 @@ test("Telegram API helper fetches bot identity through IPv4 fallback", async () 
   }
 });
 
-test("Telegram temp cleanup removes only stale files", async () => {
+test("Telegram temp cleanup removes only stale UUID-prefixed scratch files", async () => {
   const tempDir = await mkdtemp(join(tmpdir(), "pi-telegram-cleanup-"));
-  const oldFile = join(tempDir, "old.txt");
-  const freshFile = join(tempDir, "fresh.txt");
+  const oldFile = join(
+    tempDir,
+    "00000000-0000-4000-8000-000000000001-old.txt",
+  );
+  const freshFile = join(
+    tempDir,
+    "00000000-0000-4000-8000-000000000002-fresh.txt",
+  );
+  const journalFile = join(tempDir, "inbox.json");
   const nestedDir = join(tempDir, "nested");
   await writeFile(oldFile, "old", "utf8");
   await writeFile(freshFile, "fresh", "utf8");
+  await writeFile(journalFile, "durable", "utf8");
   await mkdir(nestedDir);
   await writeFile(join(nestedDir, "keep.txt"), "keep", "utf8");
   await utimes(oldFile, new Date(1_000), new Date(1_000));
+  await utimes(journalFile, new Date(1_000), new Date(1_000));
   await utimes(freshFile, new Date(10_000), new Date(10_000));
   assert.equal(await cleanupTelegramTempFiles(tempDir, 5_000, 11_000), 1);
-  assert.deepEqual((await readdir(tempDir)).sort(), ["fresh.txt", "nested"]);
+  assert.deepEqual((await readdir(tempDir)).sort(), [
+    "00000000-0000-4000-8000-000000000002-fresh.txt",
+    "inbox.json",
+    "nested",
+  ]);
 });
 
-test("Telegram temp preparation creates the directory and removes stale files", async () => {
+test("Telegram temp preparation creates the directory and removes stale scratch files", async () => {
   const parentDir = await mkdtemp(
     join(tmpdir(), "pi-telegram-prepare-parent-"),
   );
@@ -562,7 +575,10 @@ test("Telegram temp preparation creates the directory and removes stale files", 
   if (process.platform !== "win32") {
     assert.equal((await stat(tempDir)).mode & 0o777, 0o700);
   }
-  const oldFile = join(tempDir, "old.txt");
+  const oldFile = join(
+    tempDir,
+    "00000000-0000-4000-8000-000000000003-old.txt",
+  );
   await writeFile(oldFile, "old", "utf8");
   await utimes(oldFile, new Date(1_000), new Date(1_000));
   assert.equal(await prepareTelegramTempDir(tempDir, 5_000), 1);
@@ -1096,7 +1112,10 @@ test("Default Telegram bridge API runtime honors PI_CODING_AGENT_DIR for temp fi
 
 test("Telegram bridge API runtime prepares its configured temp directory", async () => {
   const tempDir = await mkdtemp(join(tmpdir(), "telegram-runtime-temp-"));
-  const staleFile = join(tempDir, "stale.txt");
+  const staleFile = join(
+    tempDir,
+    "00000000-0000-4000-8000-000000000004-stale.txt",
+  );
   await writeFile(staleFile, "old");
   const oldDate = new Date(Date.now() - 2_000);
   await utimes(staleFile, oldDate, oldDate);

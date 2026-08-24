@@ -2306,6 +2306,117 @@ test("Bus follower API caller sends method calls and returns leader results", as
   }
 });
 
+test("Bus follower API calls wait for heartbeat recovery before transport", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "pi-telegram-bus-api-recovery-"));
+  const socketPath = join(dir, "bus.sock");
+  const received: unknown[] = [];
+  const registrationState = createTelegramBusFollowerRegistrationState();
+  registrationState.setRegistered(
+    true,
+    { chatId: 1, threadId: 2 },
+    { generation: "generation-old" },
+  );
+  registrationState.beginRecovery();
+  registrationState.setRegistered(false);
+  const server = createTelegramBusLocalServer({
+    socketPath,
+    handleEnvelope: (envelope) => {
+      received.push(envelope);
+      return {
+        kind: "bus.ack",
+        requestId: envelope.requestId,
+        ok: true,
+        result: { message_id: 56 },
+      };
+    },
+  });
+  const callApi = createTelegramBusFollowerApiCaller({
+    socketPath,
+    instanceId: "inst-a",
+    createRequestId: () => "inst-a:recovery:1",
+    getRegistrationGeneration: registrationState.getGeneration,
+    waitForRegistrationGeneration: registrationState.waitForGeneration,
+    getNowMs: () => 7001,
+  });
+  try {
+    await server.start();
+    const delivery = callApi("sendRichMessage", [{ chat_id: 1 }]);
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.deepEqual(received, []);
+
+    registrationState.setRegistered(
+      true,
+      { chatId: 1, threadId: 2 },
+      { generation: "generation-restored" },
+    );
+
+    assert.deepEqual(await delivery, { message_id: 56 });
+    assert.equal(received.length, 1);
+    assert.equal(
+      (received[0] as { registrationGeneration?: string })
+        .registrationGeneration,
+      "generation-restored",
+    );
+  } finally {
+    await server.stop();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("Bus follower API calls fail before transport when registration is not restored", async () => {
+  let transportRequested = false;
+  const registrationState = createTelegramBusFollowerRegistrationState();
+  registrationState.beginRecovery();
+  const callApi = createTelegramBusFollowerApiCaller({
+    socketPath: () => {
+      transportRequested = true;
+      return "unused.sock";
+    },
+    instanceId: "inst-a",
+    createRequestId: () => "inst-a:unregistered:1",
+    getRegistrationGeneration: registrationState.getGeneration,
+    waitForRegistrationGeneration: registrationState.waitForGeneration,
+    timeoutMs: 10,
+  });
+
+  await assert.rejects(
+    () => callApi("sendRichMessage", [{ chat_id: 1 }]),
+    /Telegram bus follower is not registered/,
+  );
+  assert.equal(transportRequested, false);
+});
+
+test("Bus follower API calls do not cross an explicit recovery cancellation", async () => {
+  let transportRequested = false;
+  const registrationState = createTelegramBusFollowerRegistrationState();
+  registrationState.beginRecovery();
+  const callApi = createTelegramBusFollowerApiCaller({
+    socketPath: () => {
+      transportRequested = true;
+      return "unused.sock";
+    },
+    instanceId: "inst-a",
+    createRequestId: () => "inst-a:cancelled:1",
+    getRegistrationGeneration: registrationState.getGeneration,
+    waitForRegistrationGeneration: registrationState.waitForGeneration,
+  });
+
+  const delivery = callApi("sendRichMessage", [{ chat_id: 1 }]);
+  await new Promise((resolve) => setImmediate(resolve));
+  registrationState.cancelRecovery();
+  registrationState.setRegistered(
+    true,
+    { chatId: 1, threadId: 2 },
+    { generation: "unrelated-generation" },
+  );
+
+  await assert.rejects(
+    () => delivery,
+    /Telegram bus follower is not registered/,
+  );
+  assert.equal(transportRequested, false);
+});
+
 test("Bus follower API caller preserves structured commit-unknown errors", async () => {
   const dir = mkdtempSync(join(tmpdir(), "pi-telegram-bus-api-ambiguous-"));
   const socketPath = join(dir, "bus.sock");

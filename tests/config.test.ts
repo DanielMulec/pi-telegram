@@ -4,7 +4,6 @@
  */
 
 import assert from "node:assert/strict";
-import { existsSync } from "node:fs";
 import {
   mkdir,
   mkdtemp,
@@ -19,14 +18,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
-import { runNodeEval } from "./fixtures/node-eval.ts";
 import type { TelegramConfig } from "../lib/config.ts";
 import {
   createTelegramActiveProfileKeyGetter,
   createTelegramConfigBotIdGetter,
   createTelegramConfigControls,
   createTelegramConfigStore,
-  createTelegramPollingOffsetPersister,
   createTelegramProactivePushTargetGetter,
   createTelegramTimeInjectionModeGetter,
   createTelegramTimeInjectionModeSetter,
@@ -44,6 +41,10 @@ import {
   writeTelegramConfig,
 } from "../lib/config.ts";
 import { createTelegramSettingsMenuRuntime } from "../lib/menu-settings.ts";
+
+function legacyConfig(value: Record<string, unknown>): TelegramConfig {
+  return value as TelegramConfig;
+}
 import {
   createTelegramSetupPromptRuntime,
   getTelegramBotTokenInputDefault,
@@ -200,7 +201,7 @@ test("Telegram config helpers persist and reload config", async () => {
 });
 
 test("Telegram default profile normalization moves legacy root identity", () => {
-  const normalized = normalizeTelegramDefaultProfileConfig({
+  const normalized = normalizeTelegramDefaultProfileConfig(legacyConfig({
     botToken: "123:abc",
     botUsername: "demo_bot",
     botId: 123,
@@ -208,7 +209,7 @@ test("Telegram default profile normalization moves legacy root identity", () => 
     lastUpdateId: 9,
     voice: { replyMode: "mirror" },
     profiles: { work: { botToken: "456:def" } },
-  });
+  }));
 
   assert.equal(normalized.changed, true);
   assert.deepEqual(normalized.config, {
@@ -277,26 +278,6 @@ test("Telegram default profile normalization merges non-conflicting fields", () 
   });
 });
 
-test("Telegram default profile normalization accepts root session fields without a duplicate token", () => {
-  const normalized = normalizeTelegramDefaultProfileConfig({
-    lastUpdateId: 9,
-    profiles: {
-      default: { botToken: "123:abc", allowedUserId: 7 },
-    },
-  });
-
-  assert.equal(normalized.changed, true);
-  assert.deepEqual(normalized.config, {
-    profiles: {
-      default: {
-        botToken: "123:abc",
-        allowedUserId: 7,
-        lastUpdateId: 9,
-      },
-    },
-  });
-});
-
 test("Telegram config load rejects conflicting default identity without mutation", async () => {
   const agentDir = await mkdtemp(
     join(tmpdir(), "pi-telegram-default-conflict-"),
@@ -347,13 +328,13 @@ test("Telegram config load atomically normalizes the default profile", async () 
   });
 });
 
-test("Telegram config store persists active named profile session fields without overwriting default", async () => {
+test("Telegram config store persists active named profile configuration without overwriting default", async () => {
   const agentDir = await mkdtemp(join(tmpdir(), "pi-telegram-profile-config-"));
   const configPath = join(agentDir, "telegram.json");
   const store = createTelegramConfigStore({
     agentDir,
     configPath,
-    initialConfig: {
+    initialConfig: legacyConfig({
       botToken: "default-token",
       botUsername: "default_bot",
       allowedUserId: 1,
@@ -363,17 +344,16 @@ test("Telegram config store persists active named profile session fields without
           botToken: "omp-token",
           botUsername: "omp_bot",
           allowedUserId: 2,
-          lastUpdateId: 10,
         },
       },
-    },
+    }),
   });
 
   assert.equal(store.activateProfile("omp"), true);
   assert.equal(store.getBotToken(), "omp-token");
   assert.equal(store.getAllowedUserId(), 2);
   store.setAllowedUserId(3);
-  await store.persist({ ...store.get(), lastUpdateId: 99 });
+  await store.persist();
 
   assert.deepEqual(await readTelegramConfig(configPath), {
     voice: { replyMode: "mirror" },
@@ -387,110 +367,26 @@ test("Telegram config store persists active named profile session fields without
         botToken: "omp-token",
         botUsername: "omp_bot",
         allowedUserId: 3,
-        lastUpdateId: 99,
       },
     },
   });
-});
-
-test("Telegram config transactions merge concurrent profile offsets and global fields", async () => {
-  const dir = await mkdtemp(join(tmpdir(), "pi-telegram-config-race-"));
-  const configPath = join(dir, "telegram.json");
-  const startPath = join(dir, "start");
-  await writeFile(
-    configPath,
-    JSON.stringify({
-      botToken: "default-token",
-      profiles: {
-        work: { botToken: "work-token", lastUpdateId: 1 },
-        personal: { botToken: "personal-token", lastUpdateId: 2 },
-      },
-    }),
-  );
-  const moduleUrl = new URL("../lib/config.ts", import.meta.url).href;
-  const children = [
-    { profile: "work", offset: "11", field: "proactive" },
-    { profile: "personal", offset: "22", field: "voice" },
-  ].map(({ profile, offset, field }) => {
-    const readyPath = join(dir, `ready-${profile}`);
-    const source = `
-      import { existsSync, writeFileSync } from "node:fs";
-      import { createTelegramConfigStore } from ${JSON.stringify(moduleUrl)};
-      const sleep = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
-      const store = createTelegramConfigStore({
-        agentDir: process.env.AGENT_DIR,
-        configPath: process.env.CONFIG_PATH,
-      });
-      await store.load();
-      if (!store.activateProfile(process.env.PROFILE)) throw new Error("profile missing");
-      writeFileSync(process.env.READY_PATH, "ready");
-      while (!existsSync(process.env.START_PATH)) sleep(2);
-      store.update((config) => {
-        config.lastUpdateId = Number(process.env.OFFSET);
-        if (process.env.FIELD === "proactive") config.assistant = { ...(config.assistant ?? {}), proactivePush: true };
-        else config.voice = { ...(config.voice ?? {}), replyMode: "mirror" };
-      });
-      await store.persist();
-    `;
-    const done = runNodeEval(source, {
-      env: {
-        AGENT_DIR: dir,
-        CONFIG_PATH: configPath,
-        PROFILE: profile,
-        OFFSET: offset,
-        FIELD: field,
-        READY_PATH: readyPath,
-        START_PATH: startPath,
-      },
-    }).then(({ code, stderr }) => {
-      if (code !== 0) throw new Error(`config child exited ${code}: ${stderr}`);
-    });
-    return { readyPath, done };
-  });
-  try {
-    const deadline = Date.now() + 3000;
-    while (
-      !children.every((child) => existsSync(child.readyPath)) &&
-      Date.now() < deadline
-    ) {
-      await new Promise((resolve) => setTimeout(resolve, 5));
-    }
-    assert.equal(
-      children.every((child) => existsSync(child.readyPath)),
-      true,
-    );
-    await writeFile(startPath, "start");
-    await Promise.all(children.map((child) => child.done));
-
-    assert.deepEqual(await readTelegramConfig(configPath), {
-      assistant: { proactivePush: true },
-      voice: { replyMode: "mirror" },
-      profiles: {
-        default: { botToken: "default-token" },
-        work: { botToken: "work-token", lastUpdateId: 11 },
-        personal: { botToken: "personal-token", lastUpdateId: 22 },
-      },
-    });
-  } finally {
-    await rm(dir, { recursive: true, force: true });
-  }
 });
 
 test("Stale config persistence preserves unrelated global and profile disk deltas", async () => {
   const dir = await mkdtemp(join(tmpdir(), "pi-telegram-config-delta-"));
   const configPath = join(dir, "telegram.json");
   try {
-    await writeTelegramConfig(dir, configPath, {
+    await writeTelegramConfig(dir, configPath, legacyConfig({
       profiles: {
         default: { botToken: "default-token" },
         work: { botToken: "work-token", lastUpdateId: 10 },
       },
       assistant: { rendering: "rich" },
-    });
+    }));
     const stale = createTelegramConfigStore({ agentDir: dir, configPath });
     await stale.load();
 
-    await writeTelegramConfig(dir, configPath, {
+    await writeTelegramConfig(dir, configPath, legacyConfig({
       profiles: {
         default: { botToken: "default-token" },
         work: {
@@ -501,7 +397,7 @@ test("Stale config persistence preserves unrelated global and profile disk delta
       },
       assistant: { rendering: "rich", timeInjection: "interval" },
       time: { interval: 5000 },
-    });
+    }));
     stale.update((config) => {
       config.voice = { replyMode: "mirror" };
     });
@@ -558,42 +454,6 @@ test("No-op config persistence adopts newer disk state without rewriting it", as
   }
 });
 
-test("Telegram config keeps same-profile polling offsets monotonic", async () => {
-  const dir = await mkdtemp(join(tmpdir(), "pi-telegram-config-offset-"));
-  const configPath = join(dir, "telegram.json");
-  await writeFile(
-    configPath,
-    JSON.stringify({
-      profiles: { work: { botToken: "work-token", lastUpdateId: 10 } },
-    }),
-  );
-  try {
-    const stale = createTelegramConfigStore({ agentDir: dir, configPath });
-    const replacement = createTelegramConfigStore({
-      agentDir: dir,
-      configPath,
-    });
-    await stale.load();
-    await replacement.load();
-    assert.equal(stale.activateProfile("work"), true);
-    assert.equal(replacement.activateProfile("work"), true);
-    const stalePollingConfig = stale.get();
-    stalePollingConfig.lastUpdateId = 12;
-    const replacementPollingConfig = replacement.get();
-    replacementPollingConfig.lastUpdateId = 20;
-
-    await replacement.persist(replacementPollingConfig);
-    await stale.persist(stalePollingConfig);
-
-    assert.equal(
-      (await readTelegramConfig(configPath)).profiles?.work.lastUpdateId,
-      20,
-    );
-  } finally {
-    await rm(dir, { recursive: true, force: true });
-  }
-});
-
 test("Telegram config store rejects missing named profile activation", () => {
   const store = createTelegramConfigStore({
     initialConfig: { profiles: { work: { botToken: "work-token" } } },
@@ -637,21 +497,25 @@ test("Telegram config load recovers invalid JSON and records a diagnostic", asyn
   assert.match(events[0] ?? "", /^config:SyntaxError:load:/);
 });
 
-test("Telegram voice reply mode helpers normalize legacy manual to hidden", () => {
+test("Telegram voice reply mode helpers normalize legacy hidden to manual", () => {
   let config: TelegramConfig = {};
   const store = { get: () => config };
   const getMode = createTelegramVoiceReplyModeGetter(store);
   const isConfigured = createTelegramVoiceReplyModeConfiguredChecker(store);
 
-  assert.equal(getMode(), "hidden");
+  assert.equal(getMode(), "manual");
   assert.equal(isConfigured(), false);
 
-  config = { voice: { replyMode: "manual" } } as unknown as TelegramConfig;
-  assert.equal(getMode(), "hidden");
+  config = { voice: { replyMode: "hidden" } };
+  assert.equal(getMode(), "manual");
+  assert.equal(isConfigured(), false);
+
+  config = { voice: { replyMode: "manual" } };
+  assert.equal(getMode(), "manual");
   assert.equal(isConfigured(), false);
 
   config = { voice: { replyMode: "invalid" } } as unknown as TelegramConfig;
-  assert.equal(getMode(), "hidden");
+  assert.equal(getMode(), "manual");
   assert.equal(isConfigured(), false);
 });
 
@@ -673,7 +537,7 @@ test("Telegram voice reply mode setter persists telegram.json", async () => {
     voice: { replyMode: "mirror" },
   });
 
-  await setMode("hidden");
+  await setMode("manual");
 
   assert.equal(store.get().voice, undefined);
   assert.deepEqual(await readTelegramConfig(configPath), {
@@ -759,78 +623,6 @@ test("Thread cleanup fails closed after invalid shared config recovery", async (
   );
   assert.equal(store.didLastLoadRecoverInvalidConfig(), true);
   assert.equal(controls.isAutomaticThreadCleanupEnabled(), false);
-});
-
-test("Polling offset persistence cannot erase settings written after poll start", async () => {
-  const agentDir = await mkdtemp(join(tmpdir(), "pi-telegram-poll-settings-"));
-  const configPath = join(agentDir, "telegram.json");
-  await writeTelegramConfig(agentDir, configPath, {
-    botToken: "123:abc",
-    lastUpdateId: 10,
-    assistant: { rendering: "rich", draftPreviews: false },
-  });
-  const store = createTelegramConfigStore({ agentDir, configPath });
-  await store.load();
-  const stalePollingConfig = store.get();
-
-  await createTelegramVoiceReplyModeSetter(store)("mirror");
-  await createTelegramConfigControls(store).setProactivePushEnabled(false);
-  stalePollingConfig.lastUpdateId = 11;
-  await createTelegramPollingOffsetPersister(store)(stalePollingConfig);
-
-  assert.deepEqual(await readTelegramConfig(configPath), {
-    profiles: {
-      default: { botToken: "123:abc", lastUpdateId: 11 },
-    },
-    assistant: {
-      rendering: "rich",
-      draftPreviews: false,
-      proactivePush: false,
-    },
-    voice: { replyMode: "mirror" },
-  });
-});
-
-test("Stale same-profile polling persistence preserves settings from another instance", async () => {
-  const agentDir = await mkdtemp(
-    join(tmpdir(), "pi-telegram-cross-instance-settings-"),
-  );
-  const configPath = join(agentDir, "telegram.json");
-  try {
-    await writeTelegramConfig(agentDir, configPath, {
-      botToken: "123:abc",
-      lastUpdateId: 10,
-      assistant: { rendering: "rich", draftPreviews: false },
-    });
-    const settingsStore = createTelegramConfigStore({ agentDir, configPath });
-    const pollingStore = createTelegramConfigStore({ agentDir, configPath });
-    await settingsStore.load();
-    await pollingStore.load();
-    const stalePollingConfig = pollingStore.get();
-
-    await createTelegramVoiceReplyModeSetter(settingsStore)("mirror");
-    await createTelegramConfigControls(settingsStore).setProactivePushEnabled(
-      false,
-    );
-    stalePollingConfig.lastUpdateId = 11;
-    await createTelegramPollingOffsetPersister(pollingStore)(
-      stalePollingConfig,
-    );
-
-    assert.deepEqual(await readTelegramConfig(configPath), {
-      profiles: {
-        default: { botToken: "123:abc", lastUpdateId: 11 },
-      },
-      assistant: {
-        rendering: "rich",
-        draftPreviews: false,
-        proactivePush: false,
-      },
-      voice: { replyMode: "mirror" },
-    });
-  } finally {
-    await rm(agentDir, { recursive: true, force: true });
-  }
 });
 
 test("Telegram draft preview config reads and migrates legacy rich flag", async () => {

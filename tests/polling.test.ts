@@ -24,6 +24,7 @@ import {
   createTelegramThreadCapabilityMonitor,
   createTelegramThreadCapabilityStateRuntime,
   createTelegramThreadTargetObservationBinding,
+  cutOverTelegramPollingCursor,
   getLatestTelegramUpdateId,
   getTelegramGetUpdatesRequestBudgetMs,
   isTelegramGetUpdatesConflictError,
@@ -43,6 +44,7 @@ import {
 const TEST_CONTEXT = "ctx";
 const NOOP_JOURNAL_ADMISSION = {
   appendUpdateBatch: (_updates: readonly { update_id: number }[]) => undefined,
+  getAcceptedThroughUpdateId: () => 1,
   getJournalEntryCount: () => 0,
   signalUpdateWorker: () => {},
 };
@@ -101,17 +103,82 @@ test("Polling helpers extract the latest update id", () => {
   );
 });
 
-test("Polling batch admission journals before one latest-offset persist and worker signal", async () => {
-  const config = { botToken: "123:abc", lastUpdateId: 5 };
+test("Polling cursor cutover is journal-first, idempotent, and preserves existing authority", async () => {
+  let legacyCursor: number | undefined = 5;
+  let journalCursor: number | undefined;
+  const entries = [{ updateId: 7 }];
+  const events: string[] = [];
+  let failRemoval = true;
+  const cutOver = () =>
+    cutOverTelegramPollingCursor({
+      getLegacyCursor: () => legacyCursor,
+      readJournal: () => ({
+        ...(journalCursor !== undefined
+          ? { acceptedThroughUpdateId: journalCursor }
+          : {}),
+        entries,
+      }),
+      publishJournalCursor(cursor) {
+        events.push(`journal:${cursor}`);
+        journalCursor = cursor;
+      },
+      removeLegacyCursor() {
+        events.push("config:remove");
+        if (failRemoval) throw new Error("config publication failed");
+        legacyCursor = undefined;
+      },
+    });
+
+  await assert.rejects(cutOver(), /config publication failed/u);
+  assert.equal(journalCursor, 7);
+  assert.equal(legacyCursor, 5);
+  failRemoval = false;
+  await cutOver();
+  assert.equal(journalCursor, 7);
+  assert.equal(legacyCursor, undefined);
+  assert.deepEqual(events, ["journal:7", "config:remove", "config:remove"]);
+
+  legacyCursor = 99;
+  journalCursor = 100;
+  await cutOver();
+  assert.equal(journalCursor, 100);
+  assert.equal(legacyCursor, undefined);
+});
+
+test("Polling cursor cutover never removes config authority when journal publication fails", async () => {
+  let removeCalls = 0;
+  await assert.rejects(
+    cutOverTelegramPollingCursor({
+      getLegacyCursor: () => 5,
+      readJournal: () => ({ entries: [] }),
+      publishJournalCursor() {
+        throw new Error("journal publication failed");
+      },
+      removeLegacyCursor() {
+        removeCalls += 1;
+      },
+    }),
+    /journal publication failed/u,
+  );
+  assert.equal(removeCalls, 0);
+});
+
+test("Polling batch admission journals one latest cursor before worker signal", async () => {
+  const config = { botToken: "123:abc", lastUpdateId: 999 };
+  let acceptedThroughUpdateId = 5;
   const events: string[] = [];
   const result = await admitTelegramPollingUpdateBatch({
     updates: [{ update_id: 6 }, { update_id: 7 }],
     config,
-    appendBatch(updates) {
-      events.push(`append:${updates.map((update) => update.update_id).join(",")}`);
+    getAcceptedThroughUpdateId: () => acceptedThroughUpdateId,
+    appendBatch(updates, cursor) {
+      events.push(
+        `append:${updates.map((update) => update.update_id).join(",")}:${cursor}`,
+      );
+      acceptedThroughUpdateId = cursor!;
     },
-    async persistConfig(current) {
-      events.push(`persist:${current.lastUpdateId}`);
+    async persistConfig() {
+      events.push("unexpected-config-persist");
     },
     signalWorker() {
       events.push("signal");
@@ -121,12 +188,11 @@ test("Polling batch admission journals before one latest-offset persist and work
     },
   });
   assert.deepEqual(result, { updateCount: 2, latestUpdateId: 7 });
-  assert.equal(config.lastUpdateId, 7);
+  assert.equal(config.lastUpdateId, 999);
+  assert.equal(acceptedThroughUpdateId, 7);
   assert.deepEqual(events, [
     "phase:persisting-journal:6",
-    "append:6,7",
-    "phase:persisting-offset:7",
-    "persist:7",
+    "append:6,7:7",
     "signal",
   ]);
 });
@@ -156,37 +222,30 @@ test("Polling batch admission leaves offset and worker untouched when journal ap
   assert.equal(signalCalls, 0);
 });
 
-test("Polling batch admission deduplicates redelivery after offset persistence failure", async () => {
-  const config = { botToken: "123:abc", lastUpdateId: 5 };
-  const journal = new Set<number>();
-  let persistCalls = 0;
+test("Polling batch admission leaves cursor and worker untouched when atomic journal publication fails", async () => {
+  const config = { botToken: "123:abc", lastUpdateId: 999 };
+  let acceptedThroughUpdateId = 5;
   let signalCalls = 0;
-  const admit = () =>
+  await assert.rejects(
     admitTelegramPollingUpdateBatch({
       updates: [{ update_id: 6 }],
       config,
-      appendBatch(updates) {
-        for (const update of updates) journal.add(update.update_id);
+      getAcceptedThroughUpdateId: () => acceptedThroughUpdateId,
+      appendBatch() {
+        throw new Error("journal commit failed");
       },
       async persistConfig() {
-        persistCalls += 1;
-        if (persistCalls === 1) throw new Error("config commit failed");
+        assert.fail("config persistence must not own the polling cursor");
       },
       signalWorker() {
         signalCalls += 1;
       },
-    });
-
-  await assert.rejects(admit(), /config commit failed/u);
-  assert.equal(config.lastUpdateId, 5);
-  assert.deepEqual([...journal], [6]);
+    }),
+    /journal commit failed/u,
+  );
+  assert.equal(acceptedThroughUpdateId, 5);
+  assert.equal(config.lastUpdateId, 999);
   assert.equal(signalCalls, 0);
-
-  await admit();
-  assert.equal(config.lastUpdateId, 6);
-  assert.deepEqual([...journal], [6]);
-  assert.equal(persistCalls, 2);
-  assert.equal(signalCalls, 1);
 });
 
 test("Polling batch admission fails closed on non-monotonic ids", async () => {
@@ -194,7 +253,8 @@ test("Polling batch admission fails closed on non-monotonic ids", async () => {
   await assert.rejects(
     admitTelegramPollingUpdateBatch({
       updates: [{ update_id: 7 }, { update_id: 6 }],
-      config: { botToken: "123:abc", lastUpdateId: 5 },
+      config: { botToken: "123:abc" },
+      getAcceptedThroughUpdateId: () => 5,
       appendBatch() {
         appendCalls += 1;
       },
@@ -207,20 +267,26 @@ test("Polling batch admission fails closed on non-monotonic ids", async () => {
 });
 
 test("Polling restart replays journal authority after offset commit but before worker signal", async () => {
-  const config = { botToken: "123:abc", lastUpdateId: 5 };
+  const config = { botToken: "123:abc", lastUpdateId: 999 };
+  let acceptedThroughUpdateId = 5;
   const journal = new Set<number>();
   await admitTelegramPollingUpdateBatch({
     updates: [{ update_id: 6 }],
     config,
-    appendBatch(updates) {
+    getAcceptedThroughUpdateId: () => acceptedThroughUpdateId,
+    appendBatch(updates, cursor) {
       for (const update of updates) journal.add(update.update_id);
+      acceptedThroughUpdateId = cursor!;
     },
-    async persistConfig() {},
+    async persistConfig() {
+      assert.fail("config persistence must not own the polling cursor");
+    },
     signalWorker() {
       throw new Error("process exited before worker signal");
     },
   });
-  assert.equal(config.lastUpdateId, 6);
+  assert.equal(config.lastUpdateId, 999);
+  assert.equal(acceptedThroughUpdateId, 6);
   assert.deepEqual([...journal], [6]);
 
   const replayedOnRestart: number[] = [];
@@ -231,7 +297,8 @@ test("Polling restart replays journal authority after offset commit but before w
 });
 
 test("Polling batch admission contains worker signal failures after durable offset", async () => {
-  const config = { botToken: "123:abc", lastUpdateId: 5 };
+  const config = { botToken: "123:abc", lastUpdateId: 999 };
+  let acceptedThroughUpdateId = 5;
   const runtimeEvents: Array<{
     error: unknown;
     details?: Record<string, unknown>;
@@ -239,8 +306,13 @@ test("Polling batch admission contains worker signal failures after durable offs
   await admitTelegramPollingUpdateBatch({
     updates: [{ update_id: 6 }],
     config,
-    appendBatch() {},
-    async persistConfig() {},
+    getAcceptedThroughUpdateId: () => acceptedThroughUpdateId,
+    appendBatch(_updates, cursor) {
+      acceptedThroughUpdateId = cursor!;
+    },
+    async persistConfig() {
+      assert.fail("config persistence must not own the polling cursor");
+    },
     signalWorker() {
       throw new Error("worker unavailable");
     },
@@ -248,7 +320,8 @@ test("Polling batch admission contains worker signal failures after durable offs
       runtimeEvents.push({ error, details });
     },
   });
-  assert.equal(config.lastUpdateId, 6);
+  assert.equal(config.lastUpdateId, 999);
+  assert.equal(acceptedThroughUpdateId, 6);
   assert.equal(runtimeEvents.length, 1);
   assert.match(String(runtimeEvents[0]?.error), /worker unavailable/u);
   assert.deepEqual(runtimeEvents[0]?.details, {
@@ -862,7 +935,12 @@ test("Polling admission starts the session-owned worker before transport polling
   const events: string[] = [];
   let failPollingStart = false;
   let failValidation = false;
+  let failPreparation = false;
   const runtime = createTelegramPollingAdmissionRuntime<string>({
+    prepareStart: () => {
+      events.push("prepare");
+      if (failPreparation) throw new Error("cutover failed");
+    },
     validateStart: () => {
       events.push("validate");
       if (failValidation) throw new Error("cursor conflict");
@@ -887,6 +965,7 @@ test("Polling admission starts the session-owned worker before transport polling
   await runtime.start("ctx");
   await runtime.stop();
   assert.deepEqual(events, [
+    "prepare",
     "validate",
     "worker:start:ctx",
     "polling:start",
@@ -897,6 +976,7 @@ test("Polling admission starts the session-owned worker before transport polling
   failPollingStart = true;
   await assert.rejects(runtime.start("ctx-2"), /polling failed/u);
   assert.deepEqual(events, [
+    "prepare",
     "validate",
     "worker:start:ctx-2",
     "polling:start",
@@ -905,7 +985,13 @@ test("Polling admission starts the session-owned worker before transport polling
   events.length = 0;
   failValidation = true;
   await assert.rejects(runtime.start("ctx-3"), /cursor conflict/u);
-  assert.deepEqual(events, ["validate"]);
+  assert.deepEqual(events, ["prepare", "validate"]);
+
+  events.length = 0;
+  failValidation = false;
+  failPreparation = true;
+  await assert.rejects(runtime.start("ctx-4"), /cutover failed/u);
+  assert.deepEqual(events, ["prepare"]);
 });
 
 test("Polling controller owns polling promise and abort-controller state", async () => {
@@ -1000,6 +1086,7 @@ test("Durable polling assembly owns journal ports and cursor bootstrap validatio
     persistConfig: async () => undefined,
     journal: {
       appendBatch: () => undefined,
+      getAcceptedThroughUpdateId: () => undefined,
       getEntryCount: () => 0,
       signalWorker: () => undefined,
       getBootstrapEntryCount: () => bootstrapEntryCount,
@@ -1064,8 +1151,8 @@ test("Polling controller runtime binds loop runner and controller state", async 
 test("Polling controller exposes exact phases and retained response evidence", async () => {
   let nowMs = 1_000;
   let getUpdatesCalls = 0;
+  let acceptedThroughUpdateId = 5;
   let releaseAppend: (() => void) | undefined;
-  let releasePersist: (() => void) | undefined;
   let secondPollSignal: AbortSignal | undefined;
   const state = createTelegramPollingControllerState();
   const controller = createTelegramPollingControllerRuntime({
@@ -1080,16 +1167,18 @@ test("Polling controller exposes exact phases and retained response evidence", a
       secondPollSignal = signal;
       return await new Promise<never>(() => {});
     },
-    appendUpdateBatch: async () =>
+    appendUpdateBatch: async (_updates, cursor) => {
       await new Promise<void>((resolve) => {
         releaseAppend = resolve;
-      }),
+      });
+      acceptedThroughUpdateId = cursor!;
+    },
+    getAcceptedThroughUpdateId: () => acceptedThroughUpdateId,
     getJournalEntryCount: () => 0,
     signalUpdateWorker: () => {},
-    persistConfig: async () =>
-      await new Promise<void>((resolve) => {
-        releasePersist = resolve;
-      }),
+    persistConfig: async () => {
+      assert.fail("config persistence must not own the polling cursor");
+    },
     stopTypingLoop: () => {},
     updateStatus: () => {},
   });
@@ -1107,20 +1196,12 @@ test("Polling controller exposes exact phases and retained response evidence", a
   nowMs = 1_100;
   releaseAppend?.();
   await waitForPollingCondition(
-    () => state.phase === "persisting-offset" && !!releasePersist,
-    "polling did not enter persisting-offset",
-  );
-  assert.equal(state.currentUpdateId, 6);
-  assert.equal(state.phaseStartedAtMs, 1_100);
-
-  nowMs = 1_200;
-  releasePersist?.();
-  await waitForPollingCondition(
     () => state.phase === "long-poll" && !!secondPollSignal,
     "polling did not resume long-polling",
   );
+  assert.equal(acceptedThroughUpdateId, 6);
   assert.equal(state.currentUpdateId, undefined);
-  assert.equal(state.phaseStartedAtMs, 1_200);
+  assert.equal(state.phaseStartedAtMs, 1_100);
 
   nowMs = 1_300;
   await controller.stop();
@@ -1154,7 +1235,7 @@ test("Poll loop cancels stalled getUpdates at its owner-derived budget", async (
   await runTelegramPollLoop({
     ctx: TEST_CONTEXT,
     signal: controller.signal,
-    config: { botToken: "123:abc", lastUpdateId: 1 },
+    config: { botToken: "123:abc" },
     deleteWebhook: async () => {},
     getUpdatesRequestBudgetMs: (body) => {
       assert.equal(body.timeout, 30);
@@ -1205,6 +1286,7 @@ test("Poll loop runner binds config, status, and transport ports", async () => {
     lastUpdateId: 5,
   };
   const events: string[] = [];
+  let acceptedThroughUpdateId = 5;
   let calls = 0;
   const runPollLoop = createTelegramPollLoopRunner({
     getConfig: () => config,
@@ -1217,11 +1299,15 @@ test("Poll loop runner binds config, status, and transport ports", async () => {
       throw new DOMException("stop", "AbortError");
     },
     persistConfig: async () => {
-      events.push(`persist:${config.lastUpdateId}`);
+      assert.fail("config persistence must not own the polling cursor");
     },
-    appendUpdateBatch: (updates) => {
-      events.push(`append:${updates.map((update) => update.update_id).join(",")}`);
+    appendUpdateBatch: (updates, cursor) => {
+      events.push(
+        `append:${updates.map((update) => update.update_id).join(",")}:${cursor}`,
+      );
+      acceptedThroughUpdateId = cursor!;
     },
+    getAcceptedThroughUpdateId: () => acceptedThroughUpdateId,
     getJournalEntryCount: () => 0,
     signalUpdateWorker: () => {
       events.push("signal");
@@ -1245,9 +1331,7 @@ test("Poll loop runner binds config, status, and transport ports", async () => {
     "phase:long-poll:none",
     "response:1",
     "phase:persisting-journal:6",
-    "append:6",
-    "phase:persisting-offset:6",
-    "persist:6",
+    "append:6:6",
     "signal",
     "phase:long-poll:none",
   ]);
@@ -1291,7 +1375,8 @@ test("Poll loop runner ignores stale-context status failures while retrying", as
 
 test("Journal-first poll loop advances before unresolved worker execution", async () => {
   const controller = new AbortController();
-  const config = { botToken: "123:abc", lastUpdateId: 0 };
+  const config = { botToken: "123:abc", lastUpdateId: 999 };
+  let acceptedThroughUpdateId = 0;
   const events: string[] = [];
   let getUpdatesCalls = 0;
   let unresolvedWorker: Promise<void> | undefined;
@@ -1304,21 +1389,25 @@ test("Journal-first poll loop advances before unresolved worker execution", asyn
     getUpdates: async () => {
       getUpdatesCalls += 1;
       if (getUpdatesCalls === 1) return [{ update_id: 1 }];
-      assert.equal(config.lastUpdateId, 1);
+      assert.equal(acceptedThroughUpdateId, 1);
       assert.ok(unresolvedWorker);
       controller.abort();
       throw new DOMException("stop", "AbortError");
     },
-    appendUpdateBatch: (updates) => {
-      events.push(`append:${updates.map((update) => update.update_id).join(",")}`);
+    appendUpdateBatch: (updates, cursor) => {
+      events.push(
+        `append:${updates.map((update) => update.update_id).join(",")}:${cursor}`,
+      );
+      acceptedThroughUpdateId = cursor!;
     },
+    getAcceptedThroughUpdateId: () => acceptedThroughUpdateId,
     getJournalEntryCount: () => 0,
     signalUpdateWorker: () => {
       events.push("signal");
       unresolvedWorker = new Promise<void>(() => {});
     },
     persistConfig: async () => {
-      events.push(`persist:${config.lastUpdateId}`);
+      assert.fail("config persistence must not own the polling cursor");
     },
     prepareUpdateBatch: (updates) => {
       events.push(`prepare:${updates.length}`);
@@ -1330,16 +1419,14 @@ test("Journal-first poll loop advances before unresolved worker execution", asyn
   });
 
   assert.equal(getUpdatesCalls, 2);
-  assert.deepEqual(events.slice(0, 6), [
+  assert.deepEqual(events, [
     "phase:long-poll",
     "prepare:1",
     "phase:persisting-journal",
-    "append:1",
-    "phase:persisting-offset",
-    "persist:1",
+    "append:1:1",
+    "signal",
+    "phase:long-poll",
   ]);
-  assert.equal(events[6], "signal");
-  assert.equal(events[7], "phase:long-poll");
 });
 
 test("Journal-first poll loop rejects a missing cursor with retained authority", async () => {
@@ -1373,7 +1460,7 @@ test("Poll loop bootstraps once and journals each prepared response batch", asyn
     botToken: "123:abc",
   };
   let getUpdatesCalls = 0;
-  let persistCount = 0;
+  let acceptedThroughUpdateId: number | undefined;
   await runTelegramPollLoop({
     ctx: TEST_CONTEXT,
     signal: new AbortController().signal,
@@ -1386,11 +1473,15 @@ test("Poll loop bootstraps once and journals each prepared response batch", asyn
       throw new DOMException("stop", "AbortError");
     },
     persistConfig: async () => {
-      persistCount += 1;
+      assert.fail("config persistence must not own the polling cursor");
     },
-    appendUpdateBatch: (updates) => {
-      lifecycle.push(`append:${updates.map((update) => update.update_id).join(",")}`);
+    appendUpdateBatch: (updates, cursor) => {
+      lifecycle.push(
+        `append:${updates.map((update) => update.update_id).join(",")}:${cursor}`,
+      );
+      acceptedThroughUpdateId = cursor;
     },
+    getAcceptedThroughUpdateId: () => acceptedThroughUpdateId,
     getJournalEntryCount: () => 0,
     signalUpdateWorker: () => lifecycle.push("signal"),
     prepareUpdateBatch: (updates) => {
@@ -1400,9 +1491,14 @@ test("Poll loop bootstraps once and journals each prepared response batch", asyn
     onStatusReset: () => {},
     sleep: async () => {},
   });
-  assert.equal(config.lastUpdateId, 7);
-  assert.deepEqual(lifecycle, ["batch:6,7", "append:6,7", "signal"]);
-  assert.equal(persistCount, 2);
+  assert.equal(config.lastUpdateId, undefined);
+  assert.equal(acceptedThroughUpdateId, 7);
+  assert.deepEqual(lifecycle, [
+    "append::5",
+    "batch:6,7",
+    "append:6,7:7",
+    "signal",
+  ]);
 });
 
 test("Polling retry sleep resolves immediately when aborted", async () => {

@@ -9,6 +9,14 @@ import { join, normalize, relative } from "node:path";
 import test from "node:test";
 
 const PROJECT_ROOT = process.cwd();
+const releaseWorkflowSource = readFileSync(
+  join(PROJECT_ROOT, ".github", "workflows", "release.yml"),
+  "utf8",
+);
+const validateWorkflowSource = readFileSync(
+  join(PROJECT_ROOT, ".github", "workflows", "validate.yml"),
+  "utf8",
+);
 
 function getProjectTypeScriptFiles(): string[] {
   return [
@@ -24,6 +32,45 @@ function getProjectTypeScriptFiles(): string[] {
       .map((name) => join("tests", name)),
   ].sort();
 }
+
+test("Release CI validates exact tags and publishes through npm Trusted Publisher", () => {
+  assert.match(validateWorkflowSource, /^  workflow_call:$/m);
+  assert.match(
+    releaseWorkflowSource,
+    /uses: \.\/\.github\/workflows\/validate\.yml/,
+  );
+  assert.match(releaseWorkflowSource, /needs: validate/);
+  assert.match(
+    releaseWorkflowSource,
+    /group: release-\$\{\{ github\.ref_name \}\}/,
+  );
+  assert.match(releaseWorkflowSource, /HEAD\^\{commit\}/);
+  assert.match(
+    releaseWorkflowSource,
+    /refs\/tags\/\$\{tagName\}\^\{commit\}/,
+  );
+  assert.match(releaseWorkflowSource, /packageLock\.version !== version/);
+  assert.match(releaseWorkflowSource, /require npm >= 11\.5\.1/);
+  assert.match(
+    releaseWorkflowSource,
+    /npm view "\$PACKAGE_NAME@\$VERSION" --json version gitHead/,
+  );
+  assert.match(
+    releaseWorkflowSource,
+    /npm publish --access public --provenance/,
+  );
+  assert.match(
+    releaseWorkflowSource,
+    /npm pack "\$PACKAGE_NAME@\$VERSION" --dry-run --json/,
+  );
+  assert.match(releaseWorkflowSource, /\.\/index\.ts/);
+  assert.match(releaseWorkflowSource, /skills\/telegram-bridge\/SKILL\.md/);
+  assert.match(
+    releaseWorkflowSource,
+    /gh release view[\s\S]*gh release edit[\s\S]*gh release create/,
+  );
+  assert.doesNotMatch(releaseWorkflowSource, /NPM_TOKEN|NODE_AUTH_TOKEN/);
+});
 
 function getProjectSourceFiles(): string[] {
   return [

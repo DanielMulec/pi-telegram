@@ -157,16 +157,82 @@ export function createExtensionApiRuntimePorts(
   };
 }
 
-export function createSettingsManager(cwd: string): PiSettingsManager {
-  return SettingsManager.create(cwd);
+type PiSettingsManagerFactory = {
+  create: (cwd: string) => unknown | PromiseLike<unknown>;
+};
+
+type HostSettingsManager = {
+  reload?: () => void | PromiseLike<void>;
+  flush?: () => void | PromiseLike<void>;
+  getEnabledModels?: () => unknown;
+  setEnabledModels?: (patterns: string[] | undefined) => void;
+  get?: (key: string) => unknown;
+  set?: (key: string, value: unknown) => void;
+};
+
+function readEnabledModels(value: unknown): string[] | undefined {
+  if (value === undefined) return undefined;
+  if (Array.isArray(value) && value.every((entry) => typeof entry === "string")) {
+    return [...value];
+  }
+  throw new TypeError("Host settings enabledModels must be a string array or undefined.");
+}
+
+export function normalizeSettingsManager(manager: unknown): PiSettingsManager {
+  if (typeof manager !== "object" || manager === null) {
+    throw new TypeError("Host settings manager must be an object.");
+  }
+  const host = manager as HostSettingsManager;
+  if (typeof host.flush !== "function") {
+    throw new TypeError("Host settings manager must provide flush().");
+  }
+  const read = typeof host.getEnabledModels === "function"
+    ? () => host.getEnabledModels!.call(host)
+    : typeof host.get === "function"
+      ? () => host.get!.call(host, "enabledModels")
+      : undefined;
+  const write = typeof host.setEnabledModels === "function"
+    ? (patterns: string[] | undefined) =>
+        host.setEnabledModels!.call(host, patterns)
+    : typeof host.set === "function"
+      ? (patterns: string[] | undefined) =>
+          host.set!.call(host, "enabledModels", patterns ?? [])
+      : undefined;
+  if (!read || !write) {
+    throw new TypeError(
+      "Host settings manager must provide enabled-model read and write capabilities.",
+    );
+  }
+  return {
+    reload: async () => {
+      await host.reload?.call(host);
+    },
+    flush: async () => {
+      await host.flush!.call(host);
+    },
+    getEnabledModels: () => readEnabledModels(read()),
+    setEnabledModels: write,
+  };
+}
+
+export async function createSettingsManager(
+  cwd: string,
+): Promise<PiSettingsManager> {
+  // Pi returns its legacy settings surface synchronously. Compatible hosts may
+  // resolve a generic settings service asynchronously; normalize both once at
+  // the SDK boundary instead of leaking host distinctions into menu domains.
+  const factory = SettingsManager as unknown as PiSettingsManagerFactory;
+  return normalizeSettingsManager(await factory.create(cwd));
 }
 
 export function createScopedModelPatternPersister(deps: {
-  createSettingsManager: (cwd: string) => PiSettingsManager;
+  createSettingsManager: (
+    cwd: string,
+  ) => PiSettingsManager | PromiseLike<PiSettingsManager>;
   clearCachedModelMenuInputs: () => void;
 }): (patterns: string[], ctx: ExtensionContext) => Promise<void> {
   return async (patterns, ctx) => {
-    const settingsManager = deps.createSettingsManager(ctx.cwd);
+    const settingsManager = await deps.createSettingsManager(ctx.cwd);
     settingsManager.setEnabledModels(
       patterns.length > 0 ? patterns : undefined,
     );

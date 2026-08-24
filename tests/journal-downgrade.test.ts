@@ -154,6 +154,19 @@ test("Downgrade check permits fully drained leader and follower journals", async
   });
 });
 
+test("Downgrade check blocks drained journals with journal-owned cursor authority", async () => {
+  await withAgentDir(async ({ agentDir, runtimeDir }) => {
+    await writeFile(
+      join(runtimeDir, "inbox.json"),
+      JSON.stringify({ ...snapshot([]), acceptedThroughUpdateId: 9 }),
+    );
+    await expectBlocked(
+      () => runCheck(agentDir),
+      /cannot verify|malformed|unsupported/u,
+    );
+  });
+});
+
 test("Downgrade check uses PI_CODING_AGENT_DIR when no argument is provided", async () => {
   await withAgentDir(async ({ agentDir, runtimeDir }) => {
     await writeFile(

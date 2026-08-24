@@ -38,6 +38,7 @@ import {
   handleTelegramCompactCommand,
   handleTelegramCompactConfirmationCallback,
   handleTelegramModelCommand,
+  handleTelegramNextCommand,
   handleTelegramStatusCommand,
   handleTelegramStopCommand,
   parseTelegramCommand,
@@ -350,6 +351,9 @@ test("Command helpers register pi connect and disconnect commands", async () => 
     stopPolling: async () => {
       events.push("stop");
     },
+    queueAgentConnectionContext: (connected) => {
+      events.push(`context:${connected ? "connected" : "disconnected"}`);
+    },
     updateStatus: () => {
       events.push("update-status");
     },
@@ -373,8 +377,10 @@ test("Command helpers register pi connect and disconnect commands", async () => 
     "setup",
     "reload",
     "start",
+    "context:connected",
     "update-status",
     "stop",
+    "context:disconnected",
     "update-status",
   ]);
 });
@@ -922,7 +928,7 @@ test("Command target runtime binds chat reply targets to command ports", async (
     },
     sendTextReply: async (chatId, replyToMessageId, text, options) => {
       calls.push(
-        `reply:${chatId}:${replyToMessageId}:${text}:${options?.target?.threadId}`,
+        `reply:${chatId}:${replyToMessageId}:${text}:${options?.parseMode ?? "plain"}:${options?.target?.threadId}`,
       );
     },
   });
@@ -939,14 +945,14 @@ test("Command target runtime binds chat reply targets to command ports", async (
   await runtime.showStatus(message, "ctx");
   await runtime.openModelMenu(message, "ctx");
   await runtime.openSettingsMenu(message, "ctx");
-  await runtime.sendTextReply(message, "hello");
+  await runtime.sendTextReply(message, "hello", { parseMode: "HTML" });
   assert.deepEqual(calls, [
     "enqueue:7:11:ctx:status:⚡ status",
     "execute",
     "status:7:11:ctx:42",
     "model:7:11:ctx:42",
-    "reply:7:11:Settings menu is unavailable.:42",
-    "reply:7:11:hello:42",
+    "reply:7:11:Settings menu is unavailable.:plain:42",
+    "reply:7:11:hello:HTML:42",
   ]);
 });
 
@@ -1075,6 +1081,27 @@ test("Command helpers run stop command side effects", async () => {
     "abort",
     "status",
     "reply:Aborted current turn. Cleared 1 queued turn.",
+  ]);
+});
+
+test("Next command requests HTML rendering for an empty queue reply", async () => {
+  const replies: Array<{ text: string; parseMode?: "HTML" }> = [];
+  await handleTelegramNextCommand({
+    hasAbortHandler: () => false,
+    isIdle: () => true,
+    hasQueuedItems: () => false,
+    clearPendingModelSwitch: () => {},
+    abortCurrentTurn: () => {},
+    dispatchNextQueuedTurn: () => {},
+    clearFoldForDispatch: () => {},
+    updateStatus: () => {},
+    sendTextReply: async (text, options) => {
+      replies.push({ text, parseMode: options?.parseMode });
+    },
+  });
+
+  assert.deepEqual(replies, [
+    { text: "<b>Queue is empty.</b>", parseMode: "HTML" },
   ]);
 });
 
@@ -1818,7 +1845,8 @@ test("Command admission advances polling while start-menu effects remain unsettl
     },
   });
   const controller = new AbortController();
-  const config = { botToken: "123:abc", lastUpdateId: 0 };
+  const config = { botToken: "123:abc", lastUpdateId: 999 };
+  let acceptedThroughUpdateId = 0;
   let getUpdatesCalls = 0;
 
   await runTelegramPollLoop({
@@ -1832,10 +1860,14 @@ test("Command admission advances polling while start-menu effects remain unsettl
       controller.abort();
       throw new DOMException("stop", "AbortError");
     },
-    persistConfig: async (nextConfig) => {
-      persistedOffsets.push(nextConfig.lastUpdateId ?? -1);
+    persistConfig: async () => {
+      assert.fail("config persistence must not own the polling cursor");
     },
-    appendUpdateBatch: () => undefined,
+    appendUpdateBatch: (_updates, cursor) => {
+      acceptedThroughUpdateId = cursor!;
+      persistedOffsets.push(cursor!);
+    },
+    getAcceptedThroughUpdateId: () => acceptedThroughUpdateId,
     getJournalEntryCount: () => 0,
     signalUpdateWorker() {
       void handleCommand("start", message, {}).then((handled) => {
@@ -1849,7 +1881,8 @@ test("Command admission advances polling while start-menu effects remain unsettl
 
   assert.equal(allowedUserId, undefined);
   assert.equal(getUpdatesCalls, 2);
-  assert.equal(config.lastUpdateId, 1);
+  assert.equal(config.lastUpdateId, 999);
+  assert.equal(acceptedThroughUpdateId, 1);
   assert.deepEqual(persistedOffsets, [1]);
   assert.deepEqual(events.slice(0, 2), ["show", "register"]);
   assert.equal(events.includes("show:done"), false);

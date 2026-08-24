@@ -11,7 +11,7 @@ import type {
   TelegramInlineKeyboardMarkup,
 } from "./keyboard.ts";
 import {
-  parseTelegramActionPayload,
+  parseTelegramActionPayloadRows,
   parseTopLevelTelegramComment,
   replaceTopLevelHtmlComments,
 } from "./outbound-markup.ts";
@@ -24,9 +24,16 @@ import {
 const TELEGRAM_BUTTON_CALLBACK_PREFIX = "tgbtn";
 const TELEGRAM_BUTTON_ACTION_TTL_MS = 24 * 60 * 60 * 1000;
 
+export interface TelegramOutboundButtonBinding {
+  generation: string;
+  app: string;
+  revision: number;
+}
+
 export interface TelegramOutboundButtonAction {
   text: string;
   prompt: string;
+  binding?: TelegramOutboundButtonBinding;
   selectedStyle?: TelegramInlineKeyboardButtonStyle;
 }
 
@@ -72,6 +79,11 @@ export interface TelegramButtonCallbackHandlerDeps<TContext = unknown> {
     action: TelegramOutboundButtonAction,
     ctx: TContext,
   ) => boolean | void;
+  invokeBoundAction?: (
+    query: TelegramButtonCallbackQuery,
+    action: TelegramOutboundButtonAction,
+    ctx: TContext,
+  ) => Promise<false | "new" | "edit">;
   editMessageReplyMarkup?: (
     chatId: number,
     messageId: number,
@@ -146,6 +158,7 @@ export function createTelegramButtonActionStore(
       return {
         text: action.text,
         prompt: action.prompt,
+        ...(action.binding ? { binding: action.binding } : {}),
         ...(action.selectedStyle
           ? { selectedStyle: action.selectedStyle }
           : {}),
@@ -159,21 +172,31 @@ const DEFAULT_TELEGRAM_BUTTON_REPLY_MARKDOWN =
 
 export function planTelegramButtonReply(
   markdown: string,
-  deps: { registerAction: (action: TelegramOutboundButtonAction) => string },
+  deps: {
+    registerAction: (action: TelegramOutboundButtonAction) => string;
+    binding?: TelegramOutboundButtonBinding;
+  },
 ): TelegramButtonReplyPlan {
   const keyboard: TelegramOutboundButtonMarkup["inline_keyboard"] = [];
   const stripped = replaceTopLevelHtmlComments(markdown, (comment) => {
-    const command = parseTopLevelTelegramComment(comment, "telegram_button");
+    const command = ["telegram_button", "telegram_buttons"].find((candidate) =>
+      parseTopLevelTelegramComment(comment, candidate),
+    );
     if (!command) return comment.raw;
-    const payload = parseTelegramActionPayload(comment, "telegram_button");
-    const action = payload ? parseTelegramButtonAction(payload) : undefined;
-    if (action) {
-      keyboard.push([
-        {
-          text: action.text,
-          callback_data: deps.registerAction(action),
-        },
-      ]);
+    const payloadRows = parseTelegramActionPayloadRows(comment, command);
+    if (!payloadRows) return "";
+    const actionRows = payloadRows.map((payloadRow) =>
+      payloadRow.map(parseTelegramButtonAction),
+    );
+    if (actionRows.some((row) => row.some((action) => !action))) return "";
+    for (const actionRow of actionRows) {
+      keyboard.push(actionRow.map((action) => ({
+        text: action!.text,
+        callback_data: deps.registerAction({
+          ...action!,
+          ...(deps.binding ? { binding: deps.binding } : {}),
+        }),
+      })));
     }
     return "";
   });
@@ -258,6 +281,33 @@ export async function handleTelegramButtonCallbackQuery<TContext = unknown>(
   if (typeof chatId !== "number" || typeof messageId !== "number") {
     await deps.answerCallbackQuery(query.id, "Button action expired.");
     return true;
+  }
+
+  if (deps.invokeBoundAction) {
+    try {
+      const viewMode = await deps.invokeBoundAction(query, action, ctx);
+      if (viewMode) {
+        if (viewMode === "new" && query.data && query.message?.reply_markup) {
+          const selectedMarkup = markTelegramButtonSelected(
+            query.message.reply_markup,
+            query.data,
+            action.selectedStyle,
+          );
+          if (selectedMarkup && deps.editMessageReplyMarkup) {
+            try {
+              await deps.editMessageReplyMarkup(chatId, messageId, selectedMarkup);
+            } catch {
+              // The action already succeeded; old-surface styling is best-effort.
+            }
+          }
+        }
+        await deps.answerCallbackQuery(query.id, "Done.");
+        return true;
+      }
+    } catch (error) {
+      await deps.answerCallbackQuery(query.id, "Generative App action failed.");
+      throw error;
+    }
   }
 
   const enqueued = deps.enqueueButtonPrompt(query, action, ctx);

@@ -4,19 +4,21 @@
  * Owns Telegram-specific system prompt suffixes injected into pi agent turns
  */
 
-import { Type } from "@sinclair/typebox";
-
-import { getTelegramDiagnosticsDisplayPaths } from "./paths.ts";
-import type { BeforeAgentStartEvent, ExtensionAPI } from "./pi.ts";
+import type { BeforeAgentStartEvent } from "./pi.ts";
 import { TELEGRAM_PREFIX } from "./turns.ts";
+
+export const TELEGRAM_CONNECTED_CONTEXT_MESSAGE =
+  "Telegram session connected. Use Telegram features for Telegram-originated turns or explicit Telegram requests; connectivity alone is not user intent.";
+export const TELEGRAM_DISCONNECTED_CONTEXT_MESSAGE =
+  "Telegram session disconnected. Do not use Telegram delivery, actions, or Telegram-specific reply features unless the user reconnects it.";
 
 const LOCAL_SYSTEM_PROMPT_SUFFIX = `
 
-Telegram bridge available. Do not use it from local/TUI prompts unless explicitly asked.`;
+${TELEGRAM_CONNECTED_CONTEXT_MESSAGE} Load the \`telegram-bridge\` Skill for Telegram-originated turns or explicit requests involving Telegram delivery, actions, Threaded Mode, or diagnosis. Do not use Telegram-specific features from unrelated local/TUI prompts.`;
 
 const TELEGRAM_TURN_SYSTEM_PROMPT_SUFFIX = `
 
-Telegram turn note: Call \`telegram_help\` if you need the pi-telegram bridge action contract.`;
+Telegram turn note: Load and follow the \`telegram-bridge\` Skill.`;
 
 export const TELEGRAM_ATTACH_PROMPT_SNIPPET =
   "Queue files for the active Telegram reply; outside Telegram turns, send files directly to Telegram.";
@@ -34,10 +36,19 @@ export const TELEGRAM_MESSAGE_PROMPT_GUIDELINES = [
   "During an active Telegram turn, omit telegram_message for the current target and answer normally; use thread only when the user requests delivery to a different live Pi thread.",
 ] as const;
 
+const TELEGRAM_TOOL_METADATA_LINES = Object.fromEntries(
+  [
+    `- telegram_attach: ${TELEGRAM_ATTACH_PROMPT_SNIPPET}`,
+    `- telegram_message: ${TELEGRAM_MESSAGE_PROMPT_SNIPPET}`,
+    ...TELEGRAM_ATTACH_PROMPT_GUIDELINES.map((line) => `- ${line}`),
+    ...TELEGRAM_MESSAGE_PROMPT_GUIDELINES.map((line) => `- ${line}`),
+  ].map((line) => [line, true]),
+) as Record<string, true>;
+
 const TELEGRAM_MODEL_CONTEXT_TOOL_NAMES = new Set([
   "telegram_attach",
+  "telegram_bind",
   "telegram_message",
-  "telegram_help",
 ]);
 const TELEGRAM_MODEL_CONTEXT_MEMORY_KEY = Symbol.for(
   "@llblab/pi-telegram:model-context-suspended-tools",
@@ -135,95 +146,30 @@ export function createTelegramModelContextAvailabilityRuntime(deps: {
   };
 }
 
-function buildTelegramHelpText(profileName?: string): string {
-  const diagnosticsPaths = getTelegramDiagnosticsDisplayPaths(profileName);
-  return `--- TELEGRAM BRIDGE HELP ---
+export type TelegramSystemPrompt = string | string[];
 
-How to understand Telegram turns:
-- \`[telegram|thread:name|from:user|guest:group]\` marks Telegram origin and attributes.
-- \`thread\` is the visible Thread identity in Threaded Mode; it is not a bus role.
-- \`[reply]\` is quoted context only; act on the user's current instruction.
-- \`[attachments]\` are local files; \`[outputs]\` are handler results/transcripts; \`[time]\` is wall-clock context.
-- \`[voice] delivery: automatic voice\` means pi-telegram will synthesize ordinary assistant text for this turn; no \`[voice]\` line means no automatic voice policy.
+type TelegramBeforeAgentStartEvent = Omit<
+  BeforeAgentStartEvent,
+  "systemPrompt"
+> & {
+  systemPrompt: TelegramSystemPrompt;
+};
 
-How to answer Telegram turns:
-- Reply in concise, scannable mobile Telegram Rich Markdown.
-- Use \`$...$\` for inline math and \`$$...$$\` for block math.
-- Real code blocks must stay literal.
-- For generated/requested files, call \`telegram_attach(local_path)\`; do not only mention the path.
+type TelegramBeforeAgentStartResult = {
+  systemPrompt: TelegramSystemPrompt;
+};
 
-Assistant-authored Telegram actions:
-- \`telegram_voice\` and \`telegram_button\` are hidden top-level HTML comments, not Pi tools.
-- Put action comments at column zero, outside code, quotes, lists, and indented examples.
-- Action payloads use either JSON or double-quoted attributes; the colon after the action name is optional and does not affect parsing. Voice accepts equivalent \`text\` or \`value\`: \`<!-- telegram_voice: {"value":"Short summary","lang":"en"} -->\` or \`<!-- telegram_voice text="Short summary" lang="en" -->\`.
-- Keep the complete action in one top-level comment and include non-empty \`text\` or \`value\`; encode line breaks inside JSON strings as \`\\n\`.
-- Keep voice text TTS-friendly; avoid raw Markdown, code, and tables in voice text.
-- Voice delivery generates and attaches OGG automatically; do not also call \`telegram_attach\` for the same audio.
-- Voice reply modes are compact: \`hidden\` emits no automatic context, \`mirror\` emits it for voice/audio input, and \`always\` emits it for every Telegram turn. Explicit \`telegram_voice\` remains available for an intentionally distinct spoken payload.
-- Button payloads use \`label\` plus \`prompt\`, or compact \`value\` when both are identical: \`<!-- telegram_button: {"label":"Continue","prompt":"Continue with the current plan."} -->\` or \`<!-- telegram_button value="Continue" -->\`.
-- Optional \`selected_style\` in either payload form controls the button after queue admission: \`primary\` (default, blue), \`success\` (green), or \`danger\` (red). It never suppresses the prompt.
-- If hidden button comments form the whole reply, the bridge supplies the standard \`☑️ **Choose an option:**\` heading automatically.
-
-Local/TUI direct delivery:
-- Do not send Telegram actions from local/TUI prompts unless explicitly asked.
-- Use \`telegram_attach\` for files and \`telegram_message\` for direct Markdown text.
-- Direct delivery requires this Pi instance to own \`/telegram-connect\` or be registered with the Threaded Mode bus.
-- For explicit targets, pass \`chat_id\` plus optional \`thread_id\`; registered followers default to their assigned Thread target.
-- Do not use \`telegram_message\` for ordinary Telegram-originated replies; answer normally and let the bridge deliver the active turn reply.
-
-Threaded Mode:
-- pi-telegram supports private-chat Threaded Mode when Telegram exposes thread support for the bot.
-- Product/user language is Thread; Bot API primitive names may still say topic.
-- Threaded Mode has one leader transport and visible follower Pi processes joined manually through \`/telegram-connect\`.
-- Thread names are bridge-assigned or preserved identities; do not invent rename prompts or use a rename tool.
-- The \`All\` surface is for routing/control, not hidden Pi process creation.
-
-Configurable handlers:
-- \`telegram.json\` can add no-code \`inboundHandlers\`/\`outboundHandlers\` using command templates before writing an extension.
-- For speech-to-text, configure an \`inboundHandlers\` entry matching \`type: "voice"\` or \`mime: "audio/*"\`; stdout becomes \`[outputs]\` prompt context.
-- If command-template config is not enough, build a companion extension through the public pi-telegram APIs; do not import package-private \`lib/*\` paths.
-
-Debugging pi-telegram:
-- Inspect \`${diagnosticsPaths.state}\` for runtime state, roster, bindings, slots, reservations, and diagnostics.
-- Inspect \`${diagnosticsPaths.logs}\` for redacted runtime event evidence.
-- Use terminal \`telegram-status\` for compact human health; use \`telegram-status --debug\` for the full human-readable diagnostic dump.`;
-}
-
-export function getTelegramHelpText(profileName?: string): string {
-  return buildTelegramHelpText(profileName);
-}
-
-export function registerTelegramHelpTool(
-  pi: ExtensionAPI,
-  options: { getActiveProfileName?: () => string | undefined } = {},
-): void {
-  pi.registerTool({
-    name: "telegram_help",
-    label: "Telegram Help",
-    description:
-      "Read pi-telegram usage guidance for delivery actions, Threaded Mode, handlers, formatting, and debugging.",
-    parameters: Type.Object({}),
-    async execute() {
-      return {
-        content: [
-          {
-            type: "text",
-            text: getTelegramHelpText(options.getActiveProfileName?.()),
-          },
-        ],
-        details: {},
-      };
-    },
-  });
-}
+type TelegramBeforeAgentStartHook = (
+  event: TelegramBeforeAgentStartEvent,
+) => TelegramBeforeAgentStartResult;
 
 export function buildTelegramBridgeSystemPrompt(options: {
   prompt: string;
-  systemPrompt: string;
+  systemPrompt: TelegramSystemPrompt;
   telegramPrefix?: string;
   localSystemPromptSuffix: string;
   telegramTurnSystemPromptSuffix: string;
-}): { systemPrompt: string } {
+}): TelegramBeforeAgentStartResult {
   const telegramPrefix = options.telegramPrefix ?? TELEGRAM_PREFIX;
   const telegramHead = telegramPrefix.endsWith("]")
     ? telegramPrefix.slice(0, -1)
@@ -236,8 +182,14 @@ export function buildTelegramBridgeSystemPrompt(options: {
     ? `${options.telegramTurnSystemPromptSuffix}\n- The current user message came from Telegram.`
     : "";
   return {
-    systemPrompt:
-      options.systemPrompt + options.localSystemPromptSuffix + telegramSuffix,
+    systemPrompt: Array.isArray(options.systemPrompt)
+      ? [
+          ...options.systemPrompt,
+          options.localSystemPromptSuffix + telegramSuffix,
+        ]
+      : options.systemPrompt +
+        options.localSystemPromptSuffix +
+        telegramSuffix,
   };
 }
 
@@ -247,7 +199,7 @@ export function createTelegramBeforeAgentStartHook(
     localSystemPromptSuffix?: string;
     telegramTurnSystemPromptSuffix?: string;
   } = {},
-): (event: BeforeAgentStartEvent) => { systemPrompt: string } {
+): TelegramBeforeAgentStartHook {
   return (event) =>
     buildTelegramBridgeSystemPrompt({
       prompt: event.prompt,
@@ -261,23 +213,23 @@ export function createTelegramBeforeAgentStartHook(
     });
 }
 
-function stripTelegramToolMetadataFromSystemPrompt(
-  systemPrompt: string,
-): string {
-  const telegramLines = new Set([
-    `- telegram_attach: ${TELEGRAM_ATTACH_PROMPT_SNIPPET}`,
-    `- telegram_message: ${TELEGRAM_MESSAGE_PROMPT_SNIPPET}`,
-    ...TELEGRAM_ATTACH_PROMPT_GUIDELINES.map((line) => `- ${line}`),
-    ...TELEGRAM_MESSAGE_PROMPT_GUIDELINES.map((line) => `- ${line}`),
-  ]);
+function stripTelegramToolMetadataFromString(systemPrompt: string): string {
   return systemPrompt
     .split("\n")
-    .filter((line) => !telegramLines.has(line))
+    .filter((line) => TELEGRAM_TOOL_METADATA_LINES[line] !== true)
     .join("\n");
 }
 
+function stripTelegramToolMetadataFromSystemPrompt(
+  systemPrompt: TelegramSystemPrompt,
+): TelegramSystemPrompt {
+  return Array.isArray(systemPrompt)
+    ? systemPrompt.map(stripTelegramToolMetadataFromString)
+    : stripTelegramToolMetadataFromString(systemPrompt);
+}
+
 export interface TelegramProactivePromptHookDeps<TContext> {
-  baseHook?: (event: BeforeAgentStartEvent) => { systemPrompt: string };
+  baseHook?: TelegramBeforeAgentStartHook;
   reconcileAvailability?: () => void;
   isAvailable: (ctx: TContext) => boolean;
 }
@@ -285,9 +237,9 @@ export interface TelegramProactivePromptHookDeps<TContext> {
 export function createTelegramProactiveBeforeAgentStartHook<TContext>(
   deps: TelegramProactivePromptHookDeps<TContext>,
 ): (
-  event: BeforeAgentStartEvent,
+  event: TelegramBeforeAgentStartEvent,
   ctx: TContext,
-) => Promise<{ systemPrompt: string }> {
+) => Promise<TelegramBeforeAgentStartResult> {
   const baseHook = deps.baseHook ?? createTelegramBeforeAgentStartHook();
   return async (event, ctx) => {
     deps.reconcileAvailability?.();

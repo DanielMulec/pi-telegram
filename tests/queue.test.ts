@@ -354,15 +354,23 @@ test("Queue planning rejects invalid queue admission", () => {
   );
 });
 
-test("Queue prompt append-once deduplicates repeated callback prompts", () => {
+test("Queue prompt append-once prioritizes callbacks and deduplicates repeats", () => {
+  const defaultTurn = createQueueTestPromptTurn({
+    queueOrder: 1,
+    laneOrder: 1,
+    content: [{ type: "text", text: "queued first" }],
+    historyText: "queued first",
+  });
   const callbackTurn = createQueueTestPromptTurn({
+    queueOrder: 2,
     queueLane: "priority",
-    laneOrder: 0,
+    laneOrder: 2,
     content: [{ type: "text", text: "[callback] approve" }],
     historyText: "approve",
   });
-  const first = appendTelegramPromptTurnOnce([], callbackTurn);
+  const first = appendTelegramPromptTurnOnce([defaultTurn], callbackTurn);
   assert.equal(first.appended, true);
+  assert.deepEqual(first.items, [callbackTurn, defaultTurn]);
 
   const duplicate = appendTelegramPromptTurnOnce(first.items, {
     ...callbackTurn,
@@ -370,7 +378,7 @@ test("Queue prompt append-once deduplicates repeated callback prompts", () => {
     laneOrder: 99,
   });
   assert.equal(duplicate.appended, false);
-  assert.equal(duplicate.items.length, 1);
+  assert.equal(duplicate.items.length, 2);
 
   const distinct = appendTelegramPromptTurnOnce(first.items, {
     ...callbackTurn,
@@ -378,7 +386,7 @@ test("Queue prompt append-once deduplicates repeated callback prompts", () => {
     historyText: "reject",
   });
   assert.equal(distinct.appended, true);
-  assert.equal(distinct.items.length, 2);
+  assert.equal(distinct.items.length, 3);
 });
 
 test("Queue receipts are deterministic, canonical, and scope-bound", () => {
@@ -813,16 +821,13 @@ test("Queue mutation controller binds queue accessors to runtime mutations", () 
     execute: async () => {},
   });
   let queuedItems: TelegramQueueItem<string>[] = [promptItem, controlItem];
-  let nextPriorityOrder = 7;
+  let nextLaneOrder = 7;
   const controller = createTelegramQueueMutationController<string>({
     getQueuedItems: () => queuedItems,
     setQueuedItems: (items) => {
       queuedItems = items;
     },
-    getNextPriorityReactionOrder: () => nextPriorityOrder,
-    incrementNextPriorityReactionOrder: () => {
-      nextPriorityOrder += 1;
-    },
+    allocateLaneOrder: () => nextLaneOrder++,
     onItemsDiscarded: (items, ctx) => {
       events.push(
         `discard:${ctx}:${items.map((item) => item.statusSummary).join(",")}`,
@@ -860,7 +865,7 @@ test("Queue mutation controller binds queue accessors to runtime mutations", () 
     ),
     true,
   );
-  assert.equal(nextPriorityOrder, 8);
+  assert.equal(nextLaneOrder, 8);
   const reprioritized = queuedItems.find((item) => item.replyToMessageId === 1);
   assert.equal(
     reprioritized?.kind === "prompt" ? reprioritized.priorityEmoji : undefined,
@@ -870,6 +875,7 @@ test("Queue mutation controller binds queue accessors to runtime mutations", () 
     controller.applyReactionByMessageId(11, { kind: "default" }, "c"),
     true,
   );
+  assert.equal(nextLaneOrder, 9);
   assert.equal(controller.removeByMessageIds([11], "d"), 1);
   assert.equal(controller.clear("e"), 2);
   assert.deepEqual(queuedItems, []);
@@ -938,7 +944,7 @@ test("Queue mutation runtime removes, sorts, and reprioritizes prompts", () => {
     controlItem,
     priorityPrompt,
   ];
-  let nextPriorityOrder = 5;
+  let nextLaneOrder = 5;
   const deps = {
     ctx: "ctx",
     getQueuedItems: () => queuedItems,
@@ -946,10 +952,10 @@ test("Queue mutation runtime removes, sorts, and reprioritizes prompts", () => {
       queuedItems = items;
       events.push(`items:${items.map((item) => item.statusSummary).join(",")}`);
     },
-    getNextPriorityReactionOrder: () => nextPriorityOrder,
-    incrementNextPriorityReactionOrder: () => {
-      nextPriorityOrder += 1;
-      events.push(`order:${nextPriorityOrder}`);
+    allocateLaneOrder: () => {
+      const order = nextLaneOrder++;
+      events.push(`order:${order}`);
+      return order;
     },
     updateStatus: (ctx: string) => {
       events.push(`status:${ctx}`);
@@ -975,7 +981,7 @@ test("Queue mutation runtime removes, sorts, and reprioritizes prompts", () => {
     ),
     true,
   );
-  assert.equal(nextPriorityOrder, 6);
+  assert.equal(nextLaneOrder, 7);
   assert.deepEqual(
     queuedItems.map((item) => item.statusSummary),
     ["control", "prompt", "priority"],
@@ -992,6 +998,7 @@ test("Queue mutation runtime removes, sorts, and reprioritizes prompts", () => {
   assert.deepEqual(queuedItems, []);
   assert.equal(clearTelegramQueueItemsRuntime<string>(deps), 0);
   assert.deepEqual(events, [
+    "order:5",
     "items:control,prompt,priority",
     "status:ctx",
     "order:6",
@@ -1081,7 +1088,7 @@ test("Queue mutation helpers scope message-id mutations by chat and thread", () 
     prioritized,
     10,
     { kind: "default" },
-    undefined,
+    6,
     { chatId: 2 },
   ).items;
   assert.equal(
@@ -1143,6 +1150,7 @@ test("Queue reaction disposition reversibly suppresses and restores prompts", ()
     prioritized.items,
     11,
     { kind: "default" },
+    2,
   );
   assert.equal(restored.items[0]?.queueLane, "default");
   assert.equal(
@@ -1151,6 +1159,135 @@ test("Queue reaction disposition reversibly suppresses and restores prompts", ()
       : "unexpected",
     undefined,
   );
+});
+
+test("Queue reaction disposition preserves independent priority and skip flags", () => {
+  const prompt = createQueueTestPromptTurn({
+    queueLane: "priority",
+    laneOrder: 3,
+    priorityEmoji: "👍",
+  });
+  const combined = applyTelegramQueuePromptReactionDisposition(
+    [prompt],
+    prompt.sourceMessageIds[0]!,
+    {
+      kind: "reaction-transition",
+      suppressionEmoji: "💩",
+    },
+    99,
+  );
+  const skipped = combined.items[0];
+  assert.equal(skipped?.queueLane, "priority");
+  assert.equal(skipped?.laneOrder, 3);
+  assert.equal(
+    skipped?.kind === "prompt" ? skipped.priorityEmoji : undefined,
+    "👍",
+  );
+  assert.equal(
+    skipped?.kind === "prompt"
+      ? skipped.reactionSuppressionEmoji
+      : undefined,
+    "💩",
+  );
+
+  const kept = applyTelegramQueuePromptReactionDisposition(
+    combined.items,
+    prompt.sourceMessageIds[0]!,
+    { kind: "reaction-transition", suppressionEmoji: null },
+    99,
+  ).items[0];
+  assert.equal(kept?.queueLane, "priority");
+  assert.equal(kept?.laneOrder, 3);
+  assert.equal(
+    kept?.kind === "prompt" ? kept.reactionSuppressionEmoji : "unexpected",
+    undefined,
+  );
+});
+
+test("Queue Keep and Skip preserve exact order while lane changes alone reposition prompts", () => {
+  let queuedItems: TelegramQueueItem<string>[] = [
+    createQueueTestPromptTurn({
+      sourceMessageIds: [1],
+      queueOrder: 40,
+      queueLane: "priority",
+      laneOrder: 1,
+      statusSummary: "priority",
+    }),
+    createQueueTestPromptTurn({
+      sourceMessageIds: [10],
+      queueOrder: 10,
+      laneOrder: 10,
+      statusSummary: "before",
+    }),
+    createQueueTestPromptTurn({
+      sourceMessageIds: [20],
+      queueOrder: 20,
+      laneOrder: 20,
+      statusSummary: "target",
+    }),
+    createQueueTestPromptTurn({
+      sourceMessageIds: [30],
+      queueOrder: 30,
+      laneOrder: 30,
+      statusSummary: "after",
+    }),
+  ];
+  const deps = {
+    ctx: "ctx",
+    getQueuedItems: () => queuedItems,
+    setQueuedItems: (items: TelegramQueueItem<string>[]) => {
+      queuedItems = items;
+    },
+    allocateLaneOrder: (() => {
+      let nextLaneOrder = 100;
+      return () => nextLaneOrder++;
+    })(),
+    updateStatus: () => {},
+  };
+  const order = () => queuedItems.map((item) => item.statusSummary);
+
+  assert.equal(applyTelegramQueuePromptReactionDispositionRuntime(
+    20,
+    { kind: "suppressed", emoji: "💩" },
+    deps,
+  ), true);
+  assert.deepEqual(order(), ["priority", "before", "target", "after"]);
+  assert.equal(applyTelegramQueuePromptReactionDispositionRuntime(
+    20,
+    { kind: "default" },
+    deps,
+  ), true);
+  assert.deepEqual(order(), ["priority", "before", "target", "after"]);
+
+  assert.equal(applyTelegramQueuePromptReactionDispositionRuntime(
+    20,
+    { kind: "priority", emoji: "👍" },
+    deps,
+  ), true);
+  assert.deepEqual(order(), ["priority", "target", "before", "after"]);
+  assert.equal(applyTelegramQueuePromptReactionDispositionRuntime(
+    20,
+    {
+      kind: "priority-suppressed",
+      priorityEmoji: "👍",
+      suppressionEmoji: "💩",
+    },
+    deps,
+  ), true);
+  assert.deepEqual(order(), ["priority", "target", "before", "after"]);
+  assert.equal(applyTelegramQueuePromptReactionDispositionRuntime(
+    20,
+    { kind: "priority", emoji: "👍" },
+    deps,
+  ), true);
+  assert.deepEqual(order(), ["priority", "target", "before", "after"]);
+
+  assert.equal(applyTelegramQueuePromptReactionDispositionRuntime(
+    20,
+    { kind: "default" },
+    deps,
+  ), true);
+  assert.deepEqual(order(), ["priority", "before", "after", "target"]);
 });
 
 test("Queue priority reactions apply to attachment-only prompt turns", () => {
@@ -3492,7 +3629,6 @@ test("Session state applier syncs start and shutdown state through live stores",
     queuedTelegramItems: ["a", "b"],
     nextQueuedTelegramItemOrder: 5,
     nextQueuedTelegramControlOrder: 6,
-    nextPriorityReactionOrder: 7,
     currentTelegramModel: undefined,
     activeTelegramToolExecutions: 0,
     pendingTelegramModelSwitch: undefined,
@@ -4212,7 +4348,46 @@ test("Dispatch runtime sends prompt turns as normal user messages", () => {
   assert.deepEqual(events, ["start:2", "send:default"]);
 });
 
-test("Dispatch runtime reports prompt dispatch failures after starting", () => {
+test("Dispatch runtime commits durable prompt authority before model dispatch", () => {
+  const events: string[] = [];
+  executeTelegramQueueDispatchPlan(
+    {
+      kind: "prompt",
+      item: {
+        kind: "prompt",
+        chatId: 2,
+        replyToMessageId: 3,
+        sourceMessageIds: [3],
+        queueOrder: 2,
+        queueLane: "default",
+        laneOrder: 2,
+        queuedAttachments: [],
+        content: [{ type: "text", text: "prompt" }],
+        historyText: "prompt",
+        statusSummary: "prompt",
+      },
+      remainingItems: [],
+    },
+    {
+      executeControlItem: () => {},
+      onPromptDispatchStart: () => events.push("start"),
+      commitPromptDispatch: () => {
+        events.push("commit");
+        return false;
+      },
+      sendUserMessage: () => events.push("send"),
+      onPromptDispatchFailure: (message) => events.push(`error:${message}`),
+      onIdle: () => {},
+    },
+  );
+  assert.deepEqual(events, [
+    "start",
+    "commit",
+    "error:Telegram prompt dispatch could not be committed durably.",
+  ]);
+});
+
+test("Dispatch runtime reports send failures after durable commitment", () => {
   const events: string[] = [];
   executeTelegramQueueDispatchPlan(
     {
@@ -4239,6 +4414,10 @@ test("Dispatch runtime reports prompt dispatch failures after starting", () => {
       onPromptDispatchStart: (chatId) => {
         events.push(`start:${chatId}`);
       },
+      commitPromptDispatch: () => {
+        events.push("commit");
+        return true;
+      },
       sendUserMessage: () => {
         throw new Error("boom");
       },
@@ -4250,7 +4429,7 @@ test("Dispatch runtime reports prompt dispatch failures after starting", () => {
       },
     },
   );
-  assert.deepEqual(events, ["start:2", "error:boom"]);
+  assert.deepEqual(events, ["start:2", "commit", "error:boom"]);
 });
 
 test("Queue dispatch controller plans prompts and reports dispatch failures", () => {
@@ -4334,16 +4513,18 @@ test("Queue dispatch waits for durable admission without dropping the head item"
   assert.deepEqual(events, ["status", "items:1", "start", "send"]);
 });
 
-test("Queue dispatch skips reaction-suppressed prompts without dropping them", () => {
+test("Queue dispatch retains reaction-suppressed prompts until their turn, then drops them", () => {
   const events: string[] = [];
-  let canDispatch = true;
+  let canDispatch = false;
   let queuedItems: TelegramQueueItem<string>[] = [
     createQueueTestPromptTurn({
       sourceMessageIds: [10],
       queueOrder: 1,
       laneOrder: 1,
-      statusSummary: "suppressed",
-      reactionSuppressionEmoji: "👎",
+      statusSummary: "priority-suppressed",
+      queueLane: "priority",
+      priorityEmoji: "👍",
+      reactionSuppressionEmoji: "💩",
     }),
     createQueueTestPromptTurn({
       sourceMessageIds: [20],
@@ -4369,13 +4550,45 @@ test("Queue dispatch skips reaction-suppressed prompts without dropping them", (
   });
 
   controller.dispatchNext("ctx");
-  assert.deepEqual(events, ["start", "send:text"]);
+  assert.deepEqual(events, ["status"]);
   assert.deepEqual(
     queuedItems.map((item) => item.statusSummary),
-    ["ready", "suppressed"],
+    ["priority-suppressed", "ready"],
+  );
+
+  canDispatch = true;
+  controller.dispatchNext("ctx");
+  assert.deepEqual(events, ["status", "start", "send:text"]);
+  assert.deepEqual(
+    queuedItems.map((item) => item.statusSummary),
+    ["ready"],
   );
   controller.dispatchNext("ctx");
-  assert.deepEqual(events, ["start", "send:text", "status"]);
+  assert.deepEqual(events, ["status", "start", "send:text", "status"]);
+});
+
+test("Queue dispatch clears a suppressed final item without a model turn", () => {
+  const events: string[] = [];
+  let queuedItems: TelegramQueueItem<string>[] = [
+    createQueueTestPromptTurn({ reactionSuppressionEmoji: "👎" }),
+  ];
+  const controller = createTelegramQueueDispatchController<string>({
+    getQueuedItems: () => queuedItems,
+    setQueuedItems: (items) => {
+      queuedItems = items;
+      events.push(`items:${items.length}`);
+    },
+    canDispatch: () => true,
+    updateStatus: () => events.push("status"),
+    sendTextReply: async () => undefined,
+    onPromptDispatchStart: () => events.push("start"),
+    sendUserMessage: () => events.push("send"),
+    onPromptDispatchFailure: () => events.push("failure"),
+  });
+
+  controller.dispatchNext("ctx");
+  assert.deepEqual(events, ["items:0", "status"]);
+  assert.equal(formatQueuedTelegramItemsStatus(queuedItems), "");
 });
 
 test("Queue dispatch waits for earlier pending inbound queue mutations", () => {
@@ -4838,7 +5051,6 @@ test("Session runtime helper clears shutdown state", () => {
   assert.deepEqual(state.queuedTelegramItems, []);
   assert.equal(state.nextQueuedTelegramItemOrder, 0);
   assert.equal(state.nextQueuedTelegramControlOrder, 0);
-  assert.equal(state.nextPriorityReactionOrder, 0);
   assert.equal(state.currentTelegramModel, undefined);
   assert.equal(state.activeTelegramToolExecutions, 0);
   assert.equal(state.telegramTurnDispatchPending, false);

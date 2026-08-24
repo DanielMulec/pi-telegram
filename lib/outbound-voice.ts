@@ -100,17 +100,6 @@ async function ensureTelegramVoiceFileFormat(
   );
 }
 
-function extractVoiceResult(result: any): {
-  filePath: string;
-  transcriptText?: string;
-} {
-  if (typeof result === "string") return { filePath: result };
-  return {
-    filePath: result.audioPath,
-    transcriptText: result.transcriptText,
-  };
-}
-
 async function sendVoiceChatAction(
   deps: TelegramVoiceReplySenderDeps,
   chatId: number,
@@ -132,7 +121,6 @@ export function createTelegramVoiceReplySender<THandler = unknown>(
     options?: {
       replyToPrompt?: boolean;
       replyMarkup?: unknown;
-      transcriptText?: string;
     },
   ): Promise<void> => {
     const voiceFilePath = await ensureTelegramVoiceFileFormat(filePath);
@@ -148,7 +136,6 @@ export function createTelegramVoiceReplySender<THandler = unknown>(
       "sendVoice",
       {
         chat_id: String(turn.chatId),
-        ...(options?.transcriptText ? { caption: options.transcriptText } : {}),
         ...(replyParameters ? { reply_parameters: replyParameters } : {}),
         ...(turn.target
           ? Object.fromEntries(
@@ -257,13 +244,11 @@ export function createTelegramVoiceReplySender<THandler = unknown>(
           continue;
         }
 
-        const { filePath, transcriptText } = extractVoiceResult(providerResult);
-        voiceFilePath = filePath;
-        originalFilePath = filePath;
-        await uploadVoiceFile(turn, filePath, {
+        voiceFilePath = providerResult;
+        originalFilePath = providerResult;
+        await uploadVoiceFile(turn, providerResult, {
           replyToPrompt: options?.replyToPrompt,
           replyMarkup: options?.replyMarkup,
-          transcriptText,
         });
         return;
       } catch (error) {

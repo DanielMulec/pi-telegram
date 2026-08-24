@@ -26,10 +26,6 @@ test("Runtime facade binds grouped operations to one bridge state", () => {
   assert.equal(runtime.state, state);
   assert.equal(runtime.queue.allocateItemOrder(), 0);
   assert.equal(runtime.queue.allocateControlOrder(), 0);
-  runtime.queue.syncCounters({ nextPriorityReactionOrder: 5 });
-  assert.equal(runtime.queue.getNextPriorityReactionOrder(), 5);
-  runtime.queue.incrementNextPriorityReactionOrder();
-  assert.equal(runtime.queue.getNextPriorityReactionOrder(), 6);
   runtime.lifecycle.setDispatchPending(true);
   runtime.lifecycle.setCompactionInProgress(true);
   runtime.lifecycle.setActiveToolExecutions(3);
@@ -62,17 +58,12 @@ test("Runtime state helpers allocate queue order and manage typing loops", async
   assert.equal(Runtime.allocateTelegramQueueItemOrder(state), 0);
   assert.equal(Runtime.allocateTelegramQueueItemOrder(state), 1);
   assert.equal(Runtime.allocateTelegramQueueControlOrder(state), 0);
-  assert.equal(Runtime.getNextTelegramPriorityReactionOrder(state), 0);
-  Runtime.incrementNextTelegramPriorityReactionOrder(state);
-  assert.equal(Runtime.getNextTelegramPriorityReactionOrder(state), 1);
   Runtime.syncTelegramQueueRuntimeCounters(state, {
     nextQueuedTelegramItemOrder: 10,
     nextQueuedTelegramControlOrder: 20,
-    nextPriorityReactionOrder: 30,
   });
   assert.equal(Runtime.allocateTelegramQueueItemOrder(state), 10);
   assert.equal(Runtime.allocateTelegramQueueControlOrder(state), 20);
-  assert.equal(Runtime.getNextTelegramPriorityReactionOrder(state), 30);
   assert.equal(Runtime.hasTelegramDispatchPending(state), false);
   assert.equal(Runtime.isTelegramCompactionInProgress(state), false);
   assert.equal(Runtime.getActiveTelegramToolExecutions(state), 0);
@@ -514,6 +505,274 @@ test("Typing loop starter binds default chat and reports failures", async () => 
   await flushMicrotasks();
   assert.deepEqual(failingStatusErrors, ["boom"]);
   assert.deepEqual(runtimeEvents, ["typing:boom:8"]);
+  assert.equal(runtime.typing.stop(), true);
+});
+
+test("Typing loop does not start without Telegram transport authority", async () => {
+  const runtime = Runtime.createTelegramBridgeRuntime();
+  let calls = 0;
+  const startTypingLoop = Runtime.createTelegramTypingLoopStarter({
+    typing: runtime.typing,
+    getDefaultChatId: () => 7,
+    sendTypingAction: async () => {
+      calls += 1;
+    },
+    updateStatus: () => {},
+    isTransportAvailable: () => false,
+  });
+
+  startTypingLoop({ id: "ctx" });
+  await flushMicrotasks();
+  assert.equal(calls, 0);
+  assert.equal(runtime.typing.stop(), false);
+});
+
+test("Typing loop stops after authority loss even when a request never settles", async (ctx) => {
+  ctx.mock.timers.enable({ apis: ["setInterval"] });
+  const runtime = Runtime.createTelegramBridgeRuntime();
+  let available = true;
+  let calls = 0;
+  const startTypingLoop = Runtime.createTelegramTypingLoopStarter({
+    typing: runtime.typing,
+    getDefaultChatId: () => 7,
+    sendTypingAction: () => {
+      calls += 1;
+      return new Promise(() => {});
+    },
+    updateStatus: () => {},
+    isTransportAvailable: () => available,
+    intervalMs: 1000,
+  });
+
+  startTypingLoop({ id: "ctx" });
+  await flushMicrotasks();
+  assert.equal(calls, 1);
+  available = false;
+  ctx.mock.timers.tick(1000);
+  assert.equal(runtime.typing.stop(), false);
+  assert.equal(calls, 1);
+  ctx.mock.timers.reset();
+});
+
+test("Typing loop observes authority loss between successful timer ticks", async (ctx) => {
+  ctx.mock.timers.enable({ apis: ["setInterval"] });
+  const runtime = Runtime.createTelegramBridgeRuntime();
+  let available = true;
+  let calls = 0;
+  const startTypingLoop = Runtime.createTelegramTypingLoopStarter({
+    typing: runtime.typing,
+    getDefaultChatId: () => 7,
+    sendTypingAction: async () => {
+      calls += 1;
+    },
+    updateStatus: () => {},
+    isTransportAvailable: () => available,
+    intervalMs: 1000,
+  });
+
+  startTypingLoop({ id: "ctx" });
+  await flushMicrotasks();
+  assert.equal(calls, 1);
+  available = false;
+  ctx.mock.timers.tick(1000);
+  assert.equal(runtime.typing.stop(), false);
+  assert.equal(calls, 1);
+  ctx.mock.timers.reset();
+});
+
+test("Typing loop replacement detaches a permanently pending old request", async (ctx) => {
+  ctx.mock.timers.enable({ apis: ["setInterval"] });
+  const runtime = Runtime.createTelegramBridgeRuntime();
+  const calls: number[] = [];
+  const startTypingLoop = Runtime.createTelegramTypingLoopStarter({
+    typing: runtime.typing,
+    getDefaultChatId: () => 7,
+    sendTypingAction: (chatId) => {
+      calls.push(chatId);
+      return chatId === 7 ? new Promise(() => {}) : Promise.resolve();
+    },
+    updateStatus: () => {},
+    intervalMs: 1000,
+  });
+
+  startTypingLoop({ id: "ctx" });
+  await flushMicrotasks();
+  startTypingLoop({ id: "ctx" }, 8);
+  ctx.mock.timers.tick(1000);
+  await flushMicrotasks();
+  assert.deepEqual(calls, [7, 8]);
+  assert.equal(runtime.typing.stop(), true);
+  ctx.mock.timers.reset();
+});
+
+test("Typing loop restarts after authority loss with an old request pending", async (ctx) => {
+  ctx.mock.timers.enable({ apis: ["setInterval"] });
+  const runtime = Runtime.createTelegramBridgeRuntime();
+  let available = true;
+  const calls: number[] = [];
+  const startTypingLoop = Runtime.createTelegramTypingLoopStarter({
+    typing: runtime.typing,
+    getDefaultChatId: () => 7,
+    sendTypingAction: (chatId) => {
+      calls.push(chatId);
+      return chatId === 7 ? new Promise(() => {}) : Promise.resolve();
+    },
+    updateStatus: () => {},
+    isTransportAvailable: () => available,
+    intervalMs: 1000,
+  });
+
+  startTypingLoop({ id: "ctx" });
+  await flushMicrotasks();
+  available = false;
+  ctx.mock.timers.tick(1000);
+  assert.equal(runtime.typing.stop(), false);
+  available = true;
+  startTypingLoop({ id: "ctx" }, 8);
+  await flushMicrotasks();
+  assert.deepEqual(calls, [7, 8]);
+  assert.equal(runtime.typing.stop(), true);
+  ctx.mock.timers.reset();
+});
+
+test("Typing loop replacement fences late failures from the old loop", async (ctx) => {
+  ctx.mock.timers.enable({ apis: ["setInterval"] });
+  const runtime = Runtime.createTelegramBridgeRuntime();
+  let rejectOld: ((error: Error) => void) | undefined;
+  const calls: number[] = [];
+  const statusErrors: string[] = [];
+  const runtimeEvents: string[] = [];
+  const startTypingLoop = Runtime.createTelegramTypingLoopStarter({
+    typing: runtime.typing,
+    getDefaultChatId: () => 7,
+    sendTypingAction: (chatId) => {
+      calls.push(chatId);
+      if (chatId === 7) {
+        return new Promise((_resolve, reject) => {
+          rejectOld = reject;
+        });
+      }
+      return Promise.resolve();
+    },
+    updateStatus: (_ctx, error) => {
+      if (error) statusErrors.push(error);
+    },
+    recordRuntimeEvent: (_category, error) => {
+      runtimeEvents.push(String(error));
+    },
+    intervalMs: 1000,
+  });
+
+  startTypingLoop({ id: "ctx" });
+  await flushMicrotasks();
+  startTypingLoop({ id: "ctx" }, 8);
+  rejectOld?.(new Error("stale failure"));
+  await flushMicrotasks();
+  assert.deepEqual(calls, [7, 8]);
+  assert.deepEqual(statusErrors, []);
+  assert.deepEqual(runtimeEvents, []);
+  assert.equal(runtime.typing.stop(), true);
+  ctx.mock.timers.reset();
+});
+
+test("Typing loop skips aggregate activity when authority is lost after thread activity", async () => {
+  const runtime = Runtime.createTelegramBridgeRuntime();
+  let available = true;
+  const actions: string[] = [];
+  const startTypingLoop = Runtime.createTelegramTypingLoopStarter({
+    typing: runtime.typing,
+    getDefaultChatId: () => undefined,
+    sendTypingAction: async () => {
+      actions.push("thread");
+      available = false;
+    },
+    sendAggregateTypingAction: async () => {
+      actions.push("aggregate");
+    },
+    updateStatus: () => {},
+    isTransportAvailable: () => available,
+  });
+
+  startTypingLoop({ id: "ctx" }, 8, {
+    target: createTelegramThreadTarget(8, 44),
+  });
+  await flushMicrotasks();
+  assert.deepEqual(actions, ["thread"]);
+  assert.equal(runtime.typing.stop(), false);
+});
+
+test("Typing loop stops quietly when Telegram transport authority is lost", async () => {
+  const runtime = Runtime.createTelegramBridgeRuntime();
+  let available = true;
+  let rejectAction: ((error: Error) => void) | undefined;
+  const statusErrors: string[] = [];
+  const runtimeEvents: string[] = [];
+  const startTypingLoop = Runtime.createTelegramTypingLoopStarter({
+    typing: runtime.typing,
+    getDefaultChatId: () => 7,
+    sendTypingAction: () =>
+      new Promise((_resolve, reject) => {
+        rejectAction = reject;
+      }),
+    updateStatus: (_ctx, error) => {
+      if (error) statusErrors.push(error);
+    },
+    isTransportAvailable: () => available,
+    recordRuntimeEvent: (_category, error) => {
+      runtimeEvents.push(String(error));
+    },
+  });
+
+  startTypingLoop({ id: "ctx" });
+  await flushMicrotasks();
+  available = false;
+  rejectAction?.(new Error("Telegram bus follower is not registered."));
+  await flushMicrotasks();
+  assert.deepEqual(statusErrors, []);
+  assert.deepEqual(runtimeEvents, []);
+  assert.equal(runtime.typing.stop(), false);
+});
+
+test("Typing loop fences late failures across transport authority generations", async () => {
+  const runtime = Runtime.createTelegramBridgeRuntime();
+  let authority: string | undefined = "A";
+  let rejectOld: ((error: Error) => void) | undefined;
+  const calls: number[] = [];
+  const statusErrors: string[] = [];
+  const runtimeEvents: string[] = [];
+  const startTypingLoop = Runtime.createTelegramTypingLoopStarter({
+    typing: runtime.typing,
+    getDefaultChatId: () => 7,
+    sendTypingAction: (chatId) => {
+      calls.push(chatId);
+      if (chatId === 7) {
+        return new Promise((_resolve, reject) => {
+          rejectOld = reject;
+        });
+      }
+      return Promise.resolve();
+    },
+    updateStatus: (_ctx, error) => {
+      if (error) statusErrors.push(error);
+    },
+    getTransportAuthority: () => authority,
+    recordRuntimeEvent: (_category, error) => {
+      runtimeEvents.push(String(error));
+    },
+  });
+
+  startTypingLoop({ id: "ctx" });
+  await flushMicrotasks();
+  authority = undefined;
+  authority = "B";
+  rejectOld?.(new Error("stale authority failure"));
+  await flushMicrotasks();
+  assert.deepEqual(statusErrors, []);
+  assert.deepEqual(runtimeEvents, []);
+  assert.equal(runtime.typing.stop(), false);
+  startTypingLoop({ id: "ctx" }, 8);
+  await flushMicrotasks();
+  assert.deepEqual(calls, [7, 8]);
   assert.equal(runtime.typing.stop(), true);
 });
 

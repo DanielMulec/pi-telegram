@@ -357,7 +357,7 @@ test("Outbound message tool sends direct Telegram markdown with parsed buttons",
     canSendDirect: () => true,
     planMessage: (markdown) => ({
       markdown: markdown
-        .replace(/<!-- telegram_button: \{"value":"Continue"\} -->/, "")
+        .replace(/<!-- telegram_button \{"value":"Continue"\} -->/, "")
         .trim(),
       replyMarkup: {
         inline_keyboard: [[{ text: "Continue", callback_data: "button:1" }]],
@@ -374,7 +374,7 @@ test("Outbound message tool sends direct Telegram markdown with parsed buttons",
     },
   });
   await tools.get("telegram_message")?.execute("tool-call", {
-    text: '**hello**\n\n<!-- telegram_button: {"value":"Continue"} -->',
+    text: '**hello**\n\n<!-- telegram_button {"value":"Continue"} -->',
   });
   assert.deepEqual(sent, [
     {
@@ -386,6 +386,31 @@ test("Outbound message tool sends direct Telegram markdown with parsed buttons",
       target: undefined,
     },
   ]);
+});
+
+test("Outbound message tool errors start on a visually separated line", async () => {
+  const tools = new Map<string, RegisteredAnyTool>();
+  const api = {
+    registerTool: (definition: RegisteredAnyTool) => {
+      if (definition.name) tools.set(definition.name, definition);
+    },
+  } as unknown as ExtensionAPI;
+  registerTelegramOutboundMessageTool(api, {
+    getDefaultChatId: () => 7,
+    getActiveTurn: () => ({ chatId: 7 }),
+    canSendDirect: () => true,
+    planMessage: (markdown) => ({ markdown }),
+    sendMarkdownMessage: async () => 9,
+  });
+
+  const tool = tools.get("telegram_message");
+  assert.ok(tool);
+  await assert.rejects(
+    tool.execute("tool-call", { text: "hello" }),
+    (error: unknown) =>
+      error instanceof Error &&
+      /^\ntelegram_message cannot send directly/u.test(error.message),
+  );
 });
 
 test("Outbound message tool sends explicit thread target", async () => {

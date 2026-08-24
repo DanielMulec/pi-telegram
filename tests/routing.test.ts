@@ -493,6 +493,12 @@ interface RouteHarnessOptions {
     TestModel
   >["inboundHandlerRuntime"]["process"];
   extensionCommandBridge?: Commands.TelegramExtensionCommandBridge;
+  invokeBoundButtonAction?: Routing.TelegramInboundRouteRuntimeDeps<
+    TestMessage,
+    TestCallbackQuery,
+    TestContext,
+    TestModel
+  >["invokeBoundButtonAction"];
 }
 
 function createRouteHarness(options: RouteHarnessOptions = {}) {
@@ -593,6 +599,7 @@ function createRouteHarness(options: RouteHarnessOptions = {}) {
     },
     threadStore: options.threadStore,
     buttonActionStore,
+    invokeBoundButtonAction: options.invokeBoundButtonAction,
     updateStatus: () => events.push("status"),
     dispatchNextQueuedTelegramTurn: () => events.push("dispatch"),
     answerCallbackQuery: async (_id, text) => {
@@ -641,7 +648,41 @@ function createRouteHarness(options: RouteHarnessOptions = {}) {
   return { buttonActionStore, events, routeRuntime, telegramQueueStore };
 }
 
-test("Routing admission returns exact queued outcomes for messages and callbacks", async () => {
+test("Routing executes bound generated-button actions before queue admission", async () => {
+  const invoked: string[] = [];
+  const { buttonActionStore, events, routeRuntime, telegramQueueStore } =
+    createRouteHarness({
+      invokeBoundButtonAction: async (action) => {
+        invoked.push(action.prompt);
+        return action.prompt.includes("::") ? "new" : false;
+      },
+    });
+  const callbackData = buttonActionStore.register({
+    text: "Next",
+    prompt: "music::next",
+  });
+  await routeRuntime.handleUpdate(
+    {
+      callback_query: {
+        id: "cb-bound",
+        from: { id: 7, is_bot: false },
+        data: callbackData,
+        message: {
+          message_id: 42,
+          chat: { id: 100, type: "private" },
+          from: { id: 7, is_bot: false },
+        },
+      },
+    },
+    { cwd: "/repo" },
+  );
+  assert.deepEqual(invoked, ["music::next"]);
+  assert.equal(telegramQueueStore.getQueuedItems().length, 0);
+  assert.equal(events.includes("answer:Done."), true);
+  assert.equal(events.includes("dispatch"), false);
+});
+
+test("Routing admission returns exact outcomes and places priority callbacks first", async () => {
   const { routeRuntime, telegramQueueStore } = createRouteHarness();
   const handle = Updates.createTelegramUpdateAdmissionHandle<
     TestUpdate & { update_id: number },
@@ -705,7 +746,7 @@ test("Routing admission returns exact queued outcomes for messages and callbacks
       .getQueuedItems()
       .flatMap((item) => item.admissionReceipts ?? [])
       .map((receipt) => receipt.sourceUpdateIds),
-    [[71], [72]],
+    [[72], [71]],
   );
 });
 

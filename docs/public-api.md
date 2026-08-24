@@ -40,8 +40,8 @@ import {
 Stable commands inside Pi:
 
 - `/telegram-setup` — configure/update the bot token.
-- `/telegram-connect` — start polling here and acquire external Telegram control ownership. Accepted queue/reply state stays local if ownership later moves elsewhere.
-- `/telegram-disconnect` — after destructive confirmation, stop polling and release ownership without deleting or silencing accepted local queue state. In Threaded Mode it deletes this instance's current Telegram thread; a follower waits for its active leader to confirm generation-fenced cleanup before stopping. Graceful Pi `quit` performs the same teardown without prompting, while `reload`, `new`, `resume`, and `fork` preserve same-process handoff.
+- `/telegram-connect` — start polling here and acquire external Telegram control ownership. Accepted queue/reply state stays local if ownership later moves elsewhere. A successful command queues a hidden connection-state note for delivery with the agent's next turn without triggering one; it says Telegram is connected and that connectivity alone is not user intent.
+- `/telegram-disconnect` — after destructive confirmation, stop polling and release ownership without deleting or silencing accepted local queue state. A successful command queues the corresponding hidden, non-triggering disconnected context note; cancelled or failed disconnects do not publish a false state transition. In Threaded Mode it deletes this instance's current Telegram thread; a follower waits for its active leader to confirm generation-fenced cleanup before stopping. Graceful Pi `quit` performs the same teardown without prompting, while `reload`, `new`, `resume`, and `fork` preserve same-process handoff.
 - `/telegram-status` — show connection, polling, execution, queue, and recent event diagnostics; debug output separates poller and worker progress, durable automatic-retry state, exact foreign queued-owner identity, and negotiated protocol/build/capabilities.
 
 ### Telegram commands
@@ -61,11 +61,12 @@ This command surface is a mobile companion subset, not a raw terminal-command br
 
 ### Tools and assistant-authored actions
 
+- `telegram_bind({ app, script, argument? } | { app, method, argument? })` installs and initializes one canonical managed Generative App module under `<agent-dir>/genapps/<app>/<app>.mjs`, or invokes one named method on an installed app. Installation rejects silent replacement and noncanonical/symlink sources. Methods receive immutable JSON state, one optional JSON argument, cancellation, revision, and a bounded non-shell process port; successful state changes commit to `state.json` plus `states.jsonl`, while output-only methods leave history unchanged. After one-shot `tgbtn` resolution, a complete `app::method` or `app::method(<strict JSON>)` prompt invokes the installed app before Pi queue admission and sends its planned Markdown/buttons directly; malformed or failed bound actions never fall back to a model prompt. Direct app-output buttons retain hidden source revisions and stale actions fail before method execution; sibling processes serialize transitions and recover dead lock owners. Bound actions send a fresh message by default and retain the clicked button's selected state on its prior surface. A result may opt into `viewMode: "edit"` to replace the callback message and keyboard in place, with one fresh-send fallback only for that explicit action. Agent-mediated initial-surface revisions, process-birth lock proof, automatic refresh, and voice output remain open.
 - `telegram_attach(paths, chat_id?, thread_id?, caption?)` is the stable artifact delivery tool for generated files. During Telegram turns it queues files for the active reply; with `assistant.rendering: "rich"`, exactly one PNG/JPEG, MP4, or MP3 artifact plus non-empty final Markdown can become one reply-anchored Rich Message. HTML mode, multiple/unsupported files, Guest Mode, and voice outputs retain their established paths. Outside Telegram turns the tool sends files directly to the paired/default chat, the registered follower's assigned thread, or an explicit `chat_id` plus optional `thread_id` when this Pi instance owns `/telegram-connect` or is registered with the multi-instance bus.
 - `telegram_message(text, chat_id?, thread_id?)` sends a direct Telegram Markdown message when this Pi instance owns `/telegram-connect` or is registered with the multi-instance bus. During an active Telegram turn, omitted targeting and an explicit target equal to that turn are rejected so the ordinary final-reply path remains the sole current-target response; an explicit different chat/thread target remains allowed for requested cross-target delivery. Outside active turns, paired/default local/TUI delivery remains unchanged. Top-level `telegram_button` comments inside `text` are parsed with the same planner used for normal replies and attached to that message; buttons are never standalone Telegram messages.
-- `telegram_help()` returns detailed agent-facing guidance for pi-telegram delivery actions, Threaded Mode, formatting, and debugging. The regular prompt only points agents at this tool instead of repeating the full guidance on every turn. `telegram_attach`, `telegram_message`, and `telegram_help` remain registered but are model-active only while this instance owns direct transport or holds a live follower registration; disconnect/loss suppresses their schemas and prompt metadata, and recovery restores only the operator's previously active pi-telegram subset.
+- The bundled `telegram-bridge` Skill owns action syntax, target routing, Threaded Mode, formatting, Generative App operation, and profile-specific debugging guidance. The regular prompt routes applicable turns to that Skill. `telegram_attach`, `telegram_bind`, and `telegram_message` remain registered but are model-active only while this instance owns direct transport or holds a live follower registration; disconnect/loss suppresses their schemas and prompt metadata, and recovery restores only the operator's previously active pi-telegram subset.
 - `telegram_voice` hidden comments request Telegram-native voice delivery through either a JSON object or double-quoted attributes. Equivalent `text` or `value` supplies the spoken payload; explicit `text` takes precedence.
-- `telegram_button` hidden comments create inline buttons whose taps enqueue prompts through the same two payload forms. Use `label` plus `prompt`, or `value` when both strings are identical. The colon after either action name is optional and does not select the format. Use top-level column-zero comments outside code, quotes, lists, and indented examples; do not emit standalone button actions.
+- `telegram_button` hidden comments create inline buttons whose taps enqueue prompts. One marker accepts a JSON object, adaptive JSON/CML matrix, positional [Compact Matrix Literal](./compact-matrix-literal.md), or double-quoted attributes; `telegram_buttons` is an exact plural alias. Named JSON objects and positional cells may coexist in one matrix or row, and commas are optional only between completed elements. Top-level cells become full-width rows, while nested rows group one or more buttons horizontally without an artificial parser-width cap. CML uses `{value}`, `{label|prompt}`, or `{label|prompt|selected_style}`; the optional third atom requires a prompt and accepts only `primary`, `success`, or `danger`. It trims atom boundaries and supports only the minimal escapes `\|`, `\}`, and `\\`. Prefer one matrix comment for multiple buttons. Use JSON `label` plus `prompt`, or `value` when both strings are identical. Action markers are colon-free; colon-prefixed payloads are rejected. Use top-level column-zero comments outside code, quotes, lists, and indented examples; do not emit standalone button actions.
 
 Prompt guidance is context-aware: local/TUI prompts see only explicit direct-delivery guidance, while Telegram-originated turns receive the full action-comment syntax and phone-width output contract.
 
@@ -83,7 +84,6 @@ interface TelegramBotProfile {
   botUsername?: string; // runtime-managed
   botId?: number; // runtime-managed
   allowedUserId?: number;
-  lastUpdateId?: number; // runtime-managed
 }
 
 interface TelegramConfig {
@@ -99,8 +99,7 @@ interface TelegramConfig {
     timeInjection?: "hidden" | "always" | "interval";
   };
   voice?: {
-    replyMode?: "hidden" | "mirror" | "always";
-    sendTranscript?: boolean;
+    replyMode?: "manual" | "mirror" | "always";
   };
   time?: {
     interval?: number;
@@ -113,7 +112,7 @@ interface TelegramConfig {
 
 Bot/session identity always persists under `profiles.<name>`. The ordinary setup path uses `profiles.default`; `/telegram-setup default` and `/telegram-connect default` are exact aliases for the bare commands. Named profiles use the same shape. Shared handlers plus `assistant`, `voice`, `time`, and `threads` remain top-level. On the first `0.24.0` load, unambiguous legacy root identity moves atomically into `profiles.default`; identical duplicates collapse, complementary fields merge, and conflicting values fail closed without modifying the file.
 
-The file is global across Pi instances. Cooperating instances serialize recursive delta merges through `telegram.json.transaction`, preserve unrelated global/profile changes from newer disk snapshots, and merge `lastUpdateId` monotonically. A semantically unchanged merge adopts the latest disk state in memory without replacing the file; later commits win when two deltas intentionally change the same leaf. Same-parent temp-file replacement retries bounded transient `EPERM`, `EACCES`, and `EBUSY` destination contention without deleting the live config or leaving transaction serialization. For manual edits, stop or idle the connected instances, publish a complete valid file atomically, and let them reload. A non-transactional editor racing Pi persistence has no same-leaf conflict guarantee.
+The file is global across Pi instances and contains configuration only. The per-profile polling/admission cursor is `acceptedThroughUpdateId` in that profile's private durable update journal; it is not a config key. On first connection after this cut, a legacy config cursor is transferred directly into the journal before polling and then removed from config. Journal publication failure preserves the legacy source; config publication failure leaves the journal authoritative so retry is idempotent. Cooperating instances serialize recursive config delta merges through `telegram.json.transaction` and preserve unrelated global/profile changes from newer disk snapshots. A semantically unchanged merge adopts the latest disk state in memory without replacing the file; later commits win when two deltas intentionally change the same leaf. Same-parent temp-file replacement retries bounded transient `EPERM`, `EACCES`, and `EBUSY` destination contention without deleting the live config or leaving transaction serialization. For manual edits, stop or idle the connected instances, publish a complete valid file atomically, and let them reload. A non-transactional editor racing Pi persistence has no same-leaf conflict guarantee.
 
 Hidden/default semantics are represented by absence:
 
@@ -410,16 +409,13 @@ const offStt = registerTelegramVoiceTranscriptionProvider(
 
 const offTts = registerTelegramVoiceSynthesisProvider(
   async (text, options) => {
-    const audioPath = await synthesizeOggOpus(text, options);
-    return getTelegramVoiceSendTranscript(getCurrentTelegramConfigView())
-      ? { audioPath, transcriptText: text }
-      : { audioPath };
+    return await synthesizeOggOpus(text, options);
   },
   { id: "@scope/my-extension/tts" },
 );
 ```
 
-Stable voice-provider registrations pass a durable `id`. Omitting `id` is a compatibility path for older providers and receives a generated session-local id. Providers return `undefined` to pass. TTS providers must return `.ogg` or `.opus` files for native Telegram voice notes. `voice.sendTranscript` is the bridge-owned transcript preference; providers that expose captions should gate `transcriptText` with `getTelegramVoiceSendTranscript(config)` instead of defining a second reply-policy toggle.
+Stable voice-provider registrations pass a durable `id`. Omitting `id` is a compatibility path for older providers and receives a generated session-local id. Providers return `undefined` to pass. TTS providers must return `.ogg` or `.opus` files for native Telegram voice notes.
 
 Full behavior: [Voice Integration](./voice.md).
 
@@ -526,7 +522,6 @@ export default function demoOutbound(pi: ExtensionAPI) {
 ```ts
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import {
-  getTelegramVoiceSendTranscript,
   registerTelegramVoiceSynthesisProvider,
   registerTelegramVoiceTranscriptionProvider,
 } from "@llblab/pi-telegram/voice";
@@ -534,16 +529,12 @@ import {
 export default function demoVoice(pi: ExtensionAPI) {
   let unregisterTts: (() => void) | undefined;
   let unregisterStt: (() => void) | undefined;
-  let currentConfig: { voice?: { sendTranscript?: boolean } } = {};
   pi.on("session_start", async () => {
     unregisterTts?.();
     unregisterStt?.();
     unregisterTts = registerTelegramVoiceSynthesisProvider(
       async (text) => {
-        const audioPath = await synthesizeDemoOgg(text);
-        return getTelegramVoiceSendTranscript(currentConfig)
-          ? { audioPath, transcriptText: text }
-          : { audioPath };
+        return await synthesizeDemoOgg(text);
       },
       { id: "demo-voice/tts" },
     );

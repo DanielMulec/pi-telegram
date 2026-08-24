@@ -743,6 +743,7 @@ type RuntimeHarnessCommand = {
   handler: (args: string, ctx: unknown) => Promise<void>;
 };
 type RuntimePiHarnessOptions = {
+  sendMessage?: (message: unknown, options?: unknown) => void;
   sendUserMessage?: (content: RuntimeHarnessMessage) => void;
   activeTools?: string[];
   getThinkingLevel?: () => string;
@@ -769,6 +770,7 @@ function createRuntimePiHarness(options: RuntimePiHarnessOptions = {}) {
     setActiveTools: (names: string[]) => {
       activeTools = [...names];
     },
+    sendMessage: options.sendMessage ?? (() => {}),
     sendUserMessage: options.sendUserMessage ?? (() => {}),
     getCommands: options.getCommands ?? (() => []),
     getThinkingLevel: options.getThinkingLevel ?? (() => "medium"),
@@ -907,7 +909,7 @@ test("v0.27.12 artifacts and graceful tab cleanup preserve same-directory auto-c
         () =>
           methods.filter((entry) => entry.method === "createForumTopic").length >=
           2,
-        20_000,
+        40_000,
       );
     } catch (error) {
       throw new Error(
@@ -2290,7 +2292,7 @@ test("Lost handoff ACK cannot cancel accepted cross-process authority", async ()
       async stageRemote(input) {
         const response = await Bus.sendTelegramBusLocalEnvelope({
           socketPath,
-          timeoutMs: 50,
+          timeoutMs: 5_000,
           envelope: {
             kind: "leader.offerQueueHandoff",
             requestId: "ack-loss:1",
@@ -3158,8 +3160,8 @@ test("Extension runtime keeps proactive local result disabled even with Telegram
       "read",
       "foreign_tool",
       "telegram_attach",
+      "telegram_bind",
       "telegram_message",
-      "telegram_help",
     ]);
     await flushMicrotasks(20);
     await handlers.get("agent_end")?.(
@@ -4426,6 +4428,9 @@ test("Extension runtime blocks queued dispatch during observed auto-compaction",
       { signal: new AbortController().signal },
       ctx,
     );
+    await waitForCondition(() =>
+      runtimeEvents.includes("send:🗜 Compaction started."),
+    );
     await new Promise((resolve) => setTimeout(resolve, 80));
     assert.equal(
       runtimeEvents.includes("dispatch:[telegram] queued during active turn"),
@@ -4434,6 +4439,9 @@ test("Extension runtime blocks queued dispatch during observed auto-compaction",
     await handlers.get("session_compact")?.({}, ctx);
     await waitForCondition(() =>
       runtimeEvents.includes("dispatch:[telegram] queued during active turn"),
+    );
+    await waitForCondition(() =>
+      runtimeEvents.includes("send:✅ Compaction completed."),
     );
     await handlers.get("session_shutdown")?.({}, ctx);
   } finally {

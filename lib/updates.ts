@@ -133,24 +133,61 @@ export function getTelegramQueueReactionDisposition(
     emojis,
     TELEGRAM_REMOVAL_REACTION_EMOJIS,
   );
-  if (suppressionEmoji) return { kind: "suppressed", emoji: suppressionEmoji };
   const priorityEmoji = getTelegramReactionEmoji(
     emojis,
     TELEGRAM_PRIORITY_REACTION_EMOJIS,
   );
+  if (suppressionEmoji && priorityEmoji) {
+    return {
+      kind: "priority-suppressed",
+      priorityEmoji,
+      suppressionEmoji,
+    };
+  }
+  if (suppressionEmoji) return { kind: "suppressed", emoji: suppressionEmoji };
   if (priorityEmoji) return { kind: "priority", emoji: priorityEmoji };
   return { kind: "default" };
 }
 
-function areTelegramQueueReactionDispositionsEqual(
-  left: TelegramQueueReactionDisposition,
-  right: TelegramQueueReactionDisposition,
-): boolean {
-  return (
-    left.kind === right.kind &&
-    (left.kind === "default" ||
-      (right.kind !== "default" && left.emoji === right.emoji))
+function getTelegramQueueReactionTransition(
+  oldReactions: TelegramReactionType[],
+  newReactions: TelegramReactionType[],
+): TelegramQueueReactionDisposition | undefined {
+  const oldEmojis = collectTelegramReactionEmojis(oldReactions);
+  const newEmojis = collectTelegramReactionEmojis(newReactions);
+  const oldPriorityEmoji = getTelegramReactionEmoji(
+    oldEmojis,
+    TELEGRAM_PRIORITY_REACTION_EMOJIS,
   );
+  const newPriorityEmoji = getTelegramReactionEmoji(
+    newEmojis,
+    TELEGRAM_PRIORITY_REACTION_EMOJIS,
+  );
+  const oldSuppressionEmoji = getTelegramReactionEmoji(
+    oldEmojis,
+    TELEGRAM_REMOVAL_REACTION_EMOJIS,
+  );
+  const newSuppressionEmoji = getTelegramReactionEmoji(
+    newEmojis,
+    TELEGRAM_REMOVAL_REACTION_EMOJIS,
+  );
+  if (
+    oldPriorityEmoji === newPriorityEmoji &&
+    oldSuppressionEmoji === newSuppressionEmoji
+  ) {
+    return undefined;
+  }
+  const transition: Extract<
+    TelegramQueueReactionDisposition,
+    { kind: "reaction-transition" }
+  > = { kind: "reaction-transition" };
+  if (oldPriorityEmoji !== newPriorityEmoji) {
+    transition.priorityEmoji = newPriorityEmoji ?? null;
+  }
+  if (oldSuppressionEmoji !== newSuppressionEmoji) {
+    transition.suppressionEmoji = newSuppressionEmoji ?? null;
+  }
+  return transition;
 }
 
 export function extractDeletedTelegramMessageIds(
@@ -849,6 +886,19 @@ export type TelegramMessageOwnershipRecorder = (
   input: TelegramMessageOwnershipRecorderInput,
 ) => void;
 
+interface TelegramUnauthorizedReplyOptions {
+  parseMode?: "HTML";
+  target?: { chatId: number; threadId?: number };
+}
+
+const TELEGRAM_UNAUTHORIZED_DENIAL_COPY = "Access denied.";
+
+function formatTelegramUnauthorizedDenial(format: "plain" | "html"): string {
+  return format === "html"
+    ? `🚫 <b>${TELEGRAM_UNAUTHORIZED_DENIAL_COPY}</b>`
+    : `🚫 ${TELEGRAM_UNAUTHORIZED_DENIAL_COPY}`;
+}
+
 export interface TelegramUpdateRuntimeDeps<
   TContext = unknown,
   TReactionUpdate extends TelegramMessageReactionUpdated =
@@ -890,7 +940,11 @@ export interface TelegramUpdateRuntimeDeps<
     callbackQueryId: string,
     text?: string,
   ) => Promise<void>;
-  answerGuestQuery: (guestQueryId: string, text?: string) => Promise<void>;
+  answerGuestQuery: (
+    guestQueryId: string,
+    text?: string,
+    options?: Pick<TelegramUnauthorizedReplyOptions, "parseMode">,
+  ) => Promise<void>;
   handleAuthorizedTelegramCallbackQuery: (
     query: TCallbackQuery,
     ctx: TContext,
@@ -899,7 +953,7 @@ export interface TelegramUpdateRuntimeDeps<
     chatId: number,
     replyToMessageId: number,
     text: string,
-    options?: { target?: { chatId: number; threadId?: number } },
+    options?: TelegramUnauthorizedReplyOptions,
   ) => Promise<number | undefined>;
   handleAuthorizedTelegramMessage: (
     message: TMessage,
@@ -959,7 +1013,11 @@ export interface TelegramUpdateRuntimeControllerDeps<
     callbackQueryId: string,
     text?: string,
   ) => Promise<void>;
-  answerGuestQuery: (guestQueryId: string, text?: string) => Promise<void>;
+  answerGuestQuery: (
+    guestQueryId: string,
+    text?: string,
+    options?: Pick<TelegramUnauthorizedReplyOptions, "parseMode">,
+  ) => Promise<void>;
   handleAuthorizedTelegramCallbackQuery: (
     query: TCallbackQuery,
     ctx: TContext,
@@ -968,7 +1026,7 @@ export interface TelegramUpdateRuntimeControllerDeps<
     chatId: number,
     replyToMessageId: number,
     text: string,
-    options?: { target?: { chatId: number; threadId?: number } },
+    options?: TelegramUnauthorizedReplyOptions,
   ) => Promise<number | undefined>;
   handleAuthorizedTelegramMessage: (
     message: TMessage,
@@ -1299,17 +1357,11 @@ export async function handleAuthorizedTelegramReactionUpdate<TContext>(
     typeof reactionUpdate.chat.id === "number"
       ? { chatId: reactionUpdate.chat.id }
       : undefined;
-  const oldDisposition = getTelegramQueueReactionDisposition(
+  const reactionTransition = getTelegramQueueReactionTransition(
     reactionUpdate.old_reaction,
-  );
-  const newDisposition = getTelegramQueueReactionDisposition(
     reactionUpdate.new_reaction,
   );
-  if (
-    areTelegramQueueReactionDispositionsEqual(oldDisposition, newDisposition)
-  ) {
-    return;
-  }
+  if (!reactionTransition) return;
   deps.assertExecutionCurrent?.();
   await deps.flushPendingMediaGroupMessage?.(reactionUpdate.message_id);
   deps.assertExecutionCurrent?.();
@@ -1317,7 +1369,7 @@ export async function handleAuthorizedTelegramReactionUpdate<TContext>(
   deps.assertExecutionCurrent?.();
   deps.applyQueuedTelegramTurnReactionByMessageId(
     reactionUpdate.message_id,
-    newDisposition,
+    reactionTransition,
     deps.ctx,
     reactionScope,
   );
@@ -1418,7 +1470,7 @@ export async function executeTelegramUpdatePlan<
           assertExecutionCurrent();
           await deps.answerCallbackQuery(
             callbackQueryId,
-            "This bot is not authorized for your account.",
+            formatTelegramUnauthorizedDenial("plain"),
           );
         }
         return;
@@ -1433,7 +1485,8 @@ export async function executeTelegramUpdatePlan<
         assertExecutionCurrent();
         await deps.answerGuestQuery(
           plan.guestMessage.guest_query_id,
-          "🚫 Access denied.",
+          formatTelegramUnauthorizedDenial("html"),
+          { parseMode: "HTML" },
         );
         return;
       }
@@ -1553,8 +1606,8 @@ export async function executeTelegramUpdatePlan<
         await deps.sendTextReply(
           replyTarget.chatId,
           replyTarget.messageId,
-          "This bot is not authorized for your account.",
-          { target: replyTarget },
+          formatTelegramUnauthorizedDenial("html"),
+          { parseMode: "HTML", target: replyTarget },
         );
       }
       return;
@@ -1632,6 +1685,7 @@ export interface TelegramUpdateWorkerStateSnapshot {
 }
 
 export interface TelegramUpdateWorkerJournalSnapshot {
+  acceptedThroughUpdateId?: number;
   entries: readonly {
     updateId: number;
     update: TelegramJournaledUpdate;
@@ -3616,7 +3670,10 @@ export interface TelegramUpdateAdmissionLifecycleJournalBinding {
   runtimeKey: string;
   recoveryKey: string;
   journal: TelegramUpdateWorkerJournalPort & {
-    appendBatch: (updates: readonly TelegramJournaledUpdate[]) => unknown;
+    appendBatch: (
+      updates: readonly TelegramJournaledUpdate[],
+      acceptedThroughUpdateId?: number,
+    ) => unknown;
     applyOperatorDisposition?: (
       input: TelegramUpdateJournalOperatorDispositionInput,
     ) => TelegramUpdateJournalOperatorDispositionResult;
@@ -4250,7 +4307,10 @@ export interface TelegramUpdateAdmissionLifecycleRuntime<TContext>
   onSessionStart: (ctx: TContext) => Promise<void>;
   onSessionShutdown: () => Promise<void>;
   onTransportChanged: (ctx?: TContext) => Promise<void>;
-  appendBatch: (updates: readonly TelegramJournaledUpdate[]) => unknown;
+  appendBatch: (
+    updates: readonly TelegramJournaledUpdate[],
+    acceptedThroughUpdateId?: number,
+  ) => unknown;
   discardQueueReceipt: (input: {
     queueKind: "prompt" | "control";
     receiptId: string;
@@ -4550,11 +4610,11 @@ export function createTelegramUpdateAdmissionLifecycleRuntime<TContext>(
         await stopCurrent(true);
         if (ctx !== undefined) await bind(ctx);
       }),
-    appendBatch(updates) {
+    appendBatch(updates, acceptedThroughUpdateId) {
       if (!journal || !worker) {
         throw new Error("Telegram update admission worker is not active.");
       }
-      return journal.appendBatch(updates);
+      return journal.appendBatch(updates, acceptedThroughUpdateId);
     },
     discardQueueReceipt(input) {
       if (!journal || !worker || !journal.discardQueued) {

@@ -34,7 +34,17 @@ export type TelegramQueueLane = "control" | "priority" | "default";
 export type TelegramQueueReactionDisposition =
   | { kind: "default" }
   | { kind: "priority"; emoji: string }
-  | { kind: "suppressed"; emoji: string };
+  | { kind: "suppressed"; emoji: string }
+  | {
+      kind: "priority-suppressed";
+      priorityEmoji: string;
+      suppressionEmoji: string;
+    }
+  | {
+      kind: "reaction-transition";
+      priorityEmoji?: string | null;
+      suppressionEmoji?: string | null;
+    };
 
 export interface TelegramQueueAdmissionReceipt {
   queueKind: TelegramQueueItemKind;
@@ -821,7 +831,10 @@ export function appendTelegramPromptTurnOnce<TContext = unknown>(
         isDuplicateTelegramPromptTurn(item, turn),
     );
   if (duplicate) return { items, appended: false };
-  return { items: [...items, turn], appended: true };
+  return {
+    items: [...items, turn].sort(compareTelegramQueueItems),
+    appended: true,
+  };
 }
 
 export function compareTelegramQueueItems<TContext = unknown>(
@@ -896,7 +909,7 @@ export function applyTelegramQueuePromptReactionDisposition<
   items: TelegramQueueItem<TContext>[],
   messageId: number,
   disposition: TelegramQueueReactionDisposition,
-  priorityLaneOrder?: number,
+  destinationLaneOrder?: number,
   scope?: TelegramQueueMessageScope,
 ): { items: TelegramQueueItem<TContext>[]; changed: boolean } {
   let nextItems = items;
@@ -908,17 +921,38 @@ export function applyTelegramQueuePromptReactionDisposition<
     ) {
       continue;
     }
-    const queueLane: TelegramQueueLane =
-      disposition.kind === "priority" ? "priority" : "default";
-    const laneOrder =
-      disposition.kind === "priority" ? priorityLaneOrder : item.queueOrder;
+    const isPriority = disposition.kind === "reaction-transition"
+      ? disposition.priorityEmoji === undefined
+        ? item.queueLane === "priority"
+        : disposition.priorityEmoji !== null
+      : disposition.kind === "priority" ||
+        disposition.kind === "priority-suppressed";
+    const queueLane: TelegramQueueLane = isPriority ? "priority" : "default";
+    const laneOrder = item.queueLane === queueLane
+      ? item.laneOrder
+      : destinationLaneOrder;
     if (laneOrder === undefined) {
-      throw new Error("Telegram priority reaction order is unavailable.");
+      throw new Error("Telegram destination lane order is unavailable.");
     }
-    const priorityEmoji =
-      disposition.kind === "priority" ? disposition.emoji : undefined;
+    const priorityEmoji = disposition.kind === "reaction-transition"
+      ? disposition.priorityEmoji === undefined
+        ? item.priorityEmoji
+        : disposition.priorityEmoji ?? undefined
+      : disposition.kind === "priority"
+        ? disposition.emoji
+        : disposition.kind === "priority-suppressed"
+          ? disposition.priorityEmoji
+          : undefined;
     const reactionSuppressionEmoji =
-      disposition.kind === "suppressed" ? disposition.emoji : undefined;
+      disposition.kind === "reaction-transition"
+        ? disposition.suppressionEmoji === undefined
+          ? item.reactionSuppressionEmoji
+          : disposition.suppressionEmoji ?? undefined
+        : disposition.kind === "suppressed"
+          ? disposition.emoji
+          : disposition.kind === "priority-suppressed"
+            ? disposition.suppressionEmoji
+            : undefined;
     if (
       item.queueLane === queueLane &&
       item.laneOrder === laneOrder &&
@@ -1981,7 +2015,6 @@ export interface TelegramSessionShutdownState<TQueueItem> {
   queuedTelegramItems: TQueueItem[];
   nextQueuedTelegramItemOrder: number;
   nextQueuedTelegramControlOrder: number;
-  nextPriorityReactionOrder: number;
   currentTelegramModel: undefined;
   activeTelegramToolExecutions: number;
   pendingTelegramModelSwitch: undefined;
@@ -1993,7 +2026,6 @@ export interface TelegramSessionShutdownState<TQueueItem> {
 export interface TelegramSessionRuntimeCounterState {
   nextQueuedTelegramItemOrder?: number;
   nextQueuedTelegramControlOrder?: number;
-  nextPriorityReactionOrder?: number;
 }
 
 export interface TelegramSessionRuntimeFlagState {
@@ -2101,8 +2133,7 @@ export interface TelegramQueueMutationRuntimeDeps<
   TContext,
 > extends TelegramQueueStore<TContext>, TelegramRuntimeEventRecorderPort {
   ctx: TContext;
-  getNextPriorityReactionOrder?: () => number;
-  incrementNextPriorityReactionOrder?: () => void;
+  allocateLaneOrder?: () => number;
   onItemsDiscarded?: (
     items: readonly TelegramQueueItem<TContext>[],
     ctx: TContext,
@@ -2113,8 +2144,7 @@ export interface TelegramQueueMutationRuntimeDeps<
 export interface TelegramQueueMutationControllerDeps<
   TContext,
 > extends TelegramQueueStore<TContext>, TelegramRuntimeEventRecorderPort {
-  getNextPriorityReactionOrder?: () => number;
-  incrementNextPriorityReactionOrder?: () => void;
+  allocateLaneOrder?: () => number;
   onItemsDiscarded?: (
     items: readonly TelegramQueueItem<TContext>[],
     ctx: TContext,
@@ -2224,7 +2254,6 @@ export function buildTelegramSessionShutdownState<
     queuedTelegramItems: [],
     nextQueuedTelegramItemOrder: 0,
     nextQueuedTelegramControlOrder: 0,
-    nextPriorityReactionOrder: 0,
     currentTelegramModel: undefined,
     activeTelegramToolExecutions: 0,
     pendingTelegramModelSwitch: undefined,
@@ -2489,24 +2518,40 @@ export function applyTelegramQueuePromptReactionDispositionRuntime<TContext>(
   deps: TelegramQueueMutationRuntimeDeps<TContext>,
   scope?: TelegramQueueMessageScope,
 ): boolean {
-  const priorityLaneOrder =
-    disposition.kind === "priority"
-      ? deps.getNextPriorityReactionOrder?.()
-      : undefined;
-  if (disposition.kind === "priority" && priorityLaneOrder === undefined) {
-    return false;
-  }
+  const queuedItems = deps.getQueuedItems();
+  const changesLane = queuedItems.some((item) => {
+    if (
+      !isPendingTelegramTurn(item) ||
+      !isTelegramQueueItemInMessageScope(item, scope) ||
+      !item.sourceMessageIds.includes(messageId)
+    ) {
+      return false;
+    }
+    const queueLane: TelegramQueueLane =
+      disposition.kind === "reaction-transition"
+        ? disposition.priorityEmoji === undefined
+          ? item.queueLane
+          : disposition.priorityEmoji === null
+            ? "default"
+            : "priority"
+        : disposition.kind === "priority" ||
+            disposition.kind === "priority-suppressed"
+          ? "priority"
+          : "default";
+    return item.queueLane !== queueLane;
+  });
+  const destinationLaneOrder = changesLane
+    ? deps.allocateLaneOrder?.()
+    : undefined;
+  if (changesLane && destinationLaneOrder === undefined) return false;
   const { changed, items } = applyTelegramQueuePromptReactionDisposition(
-    deps.getQueuedItems(),
+    queuedItems,
     messageId,
     disposition,
-    priorityLaneOrder,
+    destinationLaneOrder,
     scope,
   );
   if (!changed) return false;
-  if (disposition.kind === "priority") {
-    deps.incrementNextPriorityReactionOrder?.();
-  }
   commitReorderedTelegramQueueItemsRuntime(items, deps);
   return true;
 }
@@ -2791,6 +2836,9 @@ export interface TelegramDispatchRuntimeDeps<TContext = unknown> {
     >["item"],
   ) => void;
   onPromptDispatchStart: (chatId: number) => void;
+  commitPromptDispatch?: (
+    item: Extract<TelegramQueueDispatchAction<TContext>, { kind: "prompt" }>["item"],
+  ) => boolean;
   sendUserMessage: (
     content: Extract<
       TelegramQueueDispatchAction,
@@ -2814,6 +2862,10 @@ export interface TelegramQueueDispatchControllerDeps<
   updateStatus: (ctx: TContext, error?: string) => void;
   sendTextReply: TelegramControlRuntimeDeps<TContext>["sendTextReply"];
   onPromptDispatchStart: (ctx: TContext, chatId: number) => void;
+  commitPromptDispatch?: (
+    item: Extract<TelegramQueueDispatchAction<TContext>, { kind: "prompt" }>["item"],
+    ctx: TContext,
+  ) => boolean;
   sendUserMessage: TelegramDispatchRuntimeDeps<TContext>["sendUserMessage"];
   onPromptDispatchFailure: (ctx: TContext, message: string) => void;
   isQueueItemTransportActive?: (item: TelegramQueueItem<TContext>) => boolean;
@@ -2845,6 +2897,9 @@ export function executeTelegramQueueDispatchPlan<TContext = unknown>(
   }
   deps.onPromptDispatchStart(plan.item.chatId);
   try {
+    if (deps.commitPromptDispatch && !deps.commitPromptDispatch(plan.item)) {
+      throw new Error("Telegram prompt dispatch could not be committed durably.");
+    }
     deps.sendUserMessage(plan.item.content);
   } catch (error) {
     const message = getTelegramQueueErrorMessage(error);
@@ -2877,6 +2932,7 @@ export function createTelegramQueueDispatchRuntime<TContext = unknown>(
     updateStatus: deps.updateStatus,
     sendTextReply: deps.sendTextReply,
     onPromptDispatchStart: deps.onPromptDispatchStart,
+    commitPromptDispatch: deps.commitPromptDispatch,
     sendUserMessage: deps.sendUserMessage,
     onPromptDispatchFailure: deps.onPromptDispatchFailure,
     isQueueItemTransportActive: deps.isQueueItemTransportActive,
@@ -2928,18 +2984,33 @@ export function createTelegramQueueDispatchController<TContext = unknown>(
           { phase: "transport-generation" },
         );
       }
-      const dispatchableItems: TelegramQueueItem<TContext>[] = [];
-      const suppressedActiveItems: TelegramQueueItem<TContext>[] = [];
-      for (const item of activeItems) {
-        if (
-          item.kind === "prompt" &&
-          item.reactionSuppressionEmoji !== undefined
-        ) {
-          suppressedActiveItems.push(item);
-        } else {
-          dispatchableItems.push(item);
+      const canDispatch = deps.canDispatch(ctx);
+      let nextActiveIndex = 0;
+      if (canDispatch) {
+        while (nextActiveIndex < activeItems.length) {
+          const candidate = activeItems[nextActiveIndex];
+          if (
+            !candidate ||
+            candidate.kind !== "prompt" ||
+            candidate.reactionSuppressionEmoji === undefined
+          ) {
+            break;
+          }
+          if (deps.hasPendingInboundQueueMutationForItem?.(candidate)) {
+            deps.updateStatus(ctx);
+            return;
+          }
+          if (
+            deps.isQueueItemAdmissionReady &&
+            !deps.isQueueItemAdmissionReady(candidate)
+          ) {
+            deps.updateStatus(ctx);
+            return;
+          }
+          nextActiveIndex += 1;
         }
       }
+      const dispatchableItems = activeItems.slice(nextActiveIndex);
       const nextItem = dispatchableItems[0];
       if (
         nextItem &&
@@ -2958,12 +3029,11 @@ export function createTelegramQueueDispatchController<TContext = unknown>(
       }
       const dispatchPlan = planNextTelegramQueueAction(
         dispatchableItems,
-        deps.canDispatch(ctx),
+        canDispatch,
       );
-      if (dispatchPlan.kind !== "none") {
+      if (nextActiveIndex > 0 || dispatchPlan.kind !== "none") {
         deps.setQueuedItems([
           ...dispatchPlan.remainingItems,
-          ...suppressedActiveItems,
           ...protectedInactiveItems,
         ]);
       }
@@ -3002,6 +3072,9 @@ export function createTelegramQueueDispatchController<TContext = unknown>(
         onPromptDispatchStart: (chatId) => {
           deps.onPromptDispatchStart(ctx, chatId);
         },
+        commitPromptDispatch: deps.commitPromptDispatch
+          ? (item) => deps.commitPromptDispatch!(item, ctx)
+          : undefined,
         sendUserMessage: deps.sendUserMessage,
         onPromptDispatchFailure: (message) => {
           deps.onPromptDispatchFailure(ctx, message);

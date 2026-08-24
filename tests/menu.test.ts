@@ -263,7 +263,7 @@ test("Menu state builder wires runtime to settings and model-registry ports", as
   const runtime = createTelegramModelMenuRuntime<typeof model>();
   const getModelMenuState = createTelegramModelMenuStateBuilder({
     runtime,
-    createSettingsManager: (cwd) => {
+    createSettingsManager: async (cwd) => {
       createdForCwd = cwd;
       return {
         reload: async () => {
@@ -287,6 +287,31 @@ test("Menu state builder wires runtime to settings and model-registry ports", as
   assert.equal(reloadCount, 1);
   assert.equal(refreshCount, 1);
   assert.equal(state.chatId, 42);
+  assert.deepEqual(
+    state.scopedModels.map((entry) => entry.model.id),
+    ["gpt-5"],
+  );
+});
+
+test("Menu state builder supports settings managers without reload", async () => {
+  const model = createMenuModel("openai", "gpt-5");
+  const runtime = createTelegramModelMenuRuntime<typeof model>();
+  const getModelMenuState = createTelegramModelMenuStateBuilder({
+    runtime,
+    createSettingsManager: () => ({
+      getEnabledModels: () => ["openai/gpt-5"],
+    }),
+    getActiveModel: () => model,
+  });
+
+  const state = await getModelMenuState(42, {
+    cwd: "/tmp/project",
+    modelRegistry: {
+      refresh: () => {},
+      getAvailable: () => [model],
+    },
+  });
+
   assert.deepEqual(
     state.scopedModels.map((entry) => entry.model.id),
     ["gpt-5"],
@@ -1773,15 +1798,20 @@ test("Queue menu keeps main-menu navigation on top", async () => {
     { text: "⚫️ Normal", callback_data: "queue:prio-set:1:10:normal" },
   ]);
   assert.deepEqual(markups[2]?.inline_keyboard[2], [
-    { text: "🗑 Delete", callback_data: "queue:delete:1:10" },
+    { text: "🟢 Keep", callback_data: "queue:skip-set:1:10:keep" },
+    { text: "⚫️ Skip", callback_data: "queue:skip-set:1:10:skip" },
   ]);
   assert.deepEqual(markups[3]?.inline_keyboard[1], [
     { text: "⚫️ Priority", callback_data: "queue:prio-set:1:10:priority" },
     { text: "🟣 Normal", callback_data: "queue:prio-set:1:10:normal" },
   ]);
+  assert.deepEqual(markups[3]?.inline_keyboard[2], [
+    { text: "🟢 Keep", callback_data: "queue:skip-set:1:10:keep" },
+    { text: "⚫️ Skip", callback_data: "queue:skip-set:1:10:skip" },
+  ]);
   assert.equal(
     markups[4]?.inline_keyboard[2]?.[0]?.text,
-    "1. 👎 suppressed · queued <prompt>",
+    "1. 👎 queued <prompt>",
   );
   assert.deepEqual(markups[5]?.inline_keyboard, [
     [{ text: "⬆️ Main menu", callback_data: "menu:back" }],
@@ -1860,7 +1890,7 @@ test("Queue item detail renders prompt as raw preformatted HTML", async () => {
   assert.ok((texts[0] ?? "").length < 4096);
 });
 
-test("Queue item delete requires confirmation", async () => {
+test("Queue item Keep and Skip selectors share deferred-removal state", async () => {
   const state = createMenuState(2);
   const queuedItems: TelegramQueueItem<string>[] = [
     {
@@ -1870,10 +1900,10 @@ test("Queue item delete requires confirmation", async () => {
       queueOrder: 1,
       queueLane: "default",
       laneOrder: 1,
-      statusSummary: "delete me",
+      statusSummary: "keep or skip",
       sourceMessageIds: [10],
       queuedAttachments: [],
-      content: [{ type: "text", text: "[telegram] delete me" }],
+      content: [{ type: "text", text: "[telegram] keep or skip" }],
       historyText: "",
     },
   ];
@@ -1892,15 +1922,30 @@ test("Queue item delete requires confirmation", async () => {
       append: () => {},
       reorder: () => {},
       clear: () => 0,
-      removeByMessageIds: (messageIds) => {
-        const index = queuedItems.findIndex((item) =>
-          messageIds.includes(item.replyToMessageId),
+      removeByMessageIds: () => 0,
+      applyReactionByMessageId: (messageId, disposition) => {
+        const item = queuedItems.find(
+          (entry) => entry.kind === "prompt" && entry.replyToMessageId === messageId,
         );
-        if (index === -1) return 0;
-        queuedItems.splice(index, 1);
-        return 1;
+        if (!item || item.kind !== "prompt") return false;
+        const isPriority =
+          disposition.kind === "priority" ||
+          disposition.kind === "priority-suppressed";
+        item.queueLane = isPriority ? "priority" : "default";
+        item.priorityEmoji =
+          disposition.kind === "priority"
+            ? disposition.emoji
+            : disposition.kind === "priority-suppressed"
+              ? disposition.priorityEmoji
+              : undefined;
+        item.reactionSuppressionEmoji =
+          disposition.kind === "suppressed"
+            ? disposition.emoji
+            : disposition.kind === "priority-suppressed"
+              ? disposition.suppressionEmoji
+              : undefined;
+        return true;
       },
-      applyReactionByMessageId: () => false,
     },
     sendInteractiveMessage: async () => 99,
     editInteractiveMessage: async (
@@ -1922,54 +1967,86 @@ test("Queue item delete requires confirmation", async () => {
     updateStatusMessage: async () => {},
     updateStatus: () => {},
   });
-  await runtime.handleCallbackQuery(
+
+  assert.equal(await runtime.handleCallbackQuery(
     {
-      id: "delete",
+      id: "skip",
+      data: "queue:skip-set:1:10:skip",
+      message: { chat: { id: 1 }, message_id: 2 },
+    },
+    "ctx",
+  ), true);
+  assert.equal(
+    queuedItems[0]?.kind === "prompt"
+      ? queuedItems[0].reactionSuppressionEmoji
+      : undefined,
+    "👎",
+  );
+  assert.equal(texts[0], "<b>1.</b> 👎\n<pre>[telegram] keep or skip</pre>");
+  assert.deepEqual(markups[0]?.inline_keyboard[2], [
+    { text: "⚫️ Keep", callback_data: "queue:skip-set:1:10:keep" },
+    { text: "🔴 Skip", callback_data: "queue:skip-set:1:10:skip" },
+  ]);
+
+  assert.equal(await runtime.handleCallbackQuery(
+    {
+      id: "priority-while-skipped",
+      data: "queue:prio-set:1:10:priority",
+      message: { chat: { id: 1 }, message_id: 2 },
+    },
+    "ctx",
+  ), true);
+  assert.equal(queuedItems[0]?.queueLane, "priority");
+  assert.equal(
+    queuedItems[0]?.kind === "prompt"
+      ? queuedItems[0].reactionSuppressionEmoji
+      : undefined,
+    "👎",
+  );
+  assert.deepEqual(markups[1]?.inline_keyboard[1], [
+    { text: "🟡 Priority", callback_data: "queue:prio-set:1:10:priority" },
+    { text: "⚫️ Normal", callback_data: "queue:prio-set:1:10:normal" },
+  ]);
+  assert.deepEqual(markups[1]?.inline_keyboard[2], [
+    { text: "⚫️ Keep", callback_data: "queue:skip-set:1:10:keep" },
+    { text: "🔴 Skip", callback_data: "queue:skip-set:1:10:skip" },
+  ]);
+
+  assert.equal(await runtime.handleCallbackQuery(
+    {
+      id: "keep",
+      data: "queue:skip-set:1:10:keep",
+      message: { chat: { id: 1 }, message_id: 2 },
+    },
+    "ctx",
+  ), true);
+  assert.equal(
+    queuedItems[0]?.kind === "prompt"
+      ? queuedItems[0].reactionSuppressionEmoji
+      : "unexpected",
+    undefined,
+  );
+  assert.equal(queuedItems[0]?.queueLane, "priority");
+  assert.equal(texts[2], "<b>1.</b> ⚡\n<pre>[telegram] keep or skip</pre>");
+  assert.deepEqual(markups[2]?.inline_keyboard[1], [
+    { text: "🟡 Priority", callback_data: "queue:prio-set:1:10:priority" },
+    { text: "⚫️ Normal", callback_data: "queue:prio-set:1:10:normal" },
+  ]);
+  assert.deepEqual(markups[2]?.inline_keyboard[2], [
+    { text: "🟢 Keep", callback_data: "queue:skip-set:1:10:keep" },
+    { text: "⚫️ Skip", callback_data: "queue:skip-set:1:10:skip" },
+  ]);
+  assert.deepEqual(notices, [undefined, "Prioritized.", undefined]);
+
+  assert.equal(await runtime.handleCallbackQuery(
+    {
+      id: "removed-delete-action",
       data: "queue:delete:1:10",
       message: { chat: { id: 1 }, message_id: 2 },
     },
     "ctx",
-  );
+  ), false);
   assert.equal(queuedItems.length, 1);
-  assert.equal(texts[0], "<b>Delete this queued prompt?</b>");
-  assert.deepEqual(markups[0]?.inline_keyboard, [
-    [
-      { text: "🗑 Yes, delete", callback_data: "queue:confirm-delete:1:10" },
-      { text: "❌ No", callback_data: "queue:keep:1:10" },
-    ],
-  ]);
-  await runtime.handleCallbackQuery(
-    {
-      id: "legacy-cancel",
-      data: "queue:cancel:1:10",
-      message: { chat: { id: 1 }, message_id: 2 },
-    },
-    "ctx",
-  );
-  assert.equal(queuedItems.length, 1);
-  assert.equal(texts[1], "<b>Delete this queued prompt?</b>");
-  await runtime.handleCallbackQuery(
-    {
-      id: "keep",
-      data: "queue:keep:1:10",
-      message: { chat: { id: 1 }, message_id: 2 },
-    },
-    "ctx",
-  );
-  assert.equal(queuedItems.length, 1);
-  assert.equal(texts[2], "<b>1.</b>\n<pre>[telegram] delete me</pre>");
-  assert.equal(notices[2], "Kept in queue.");
-  await runtime.handleCallbackQuery(
-    {
-      id: "confirm",
-      data: "queue:confirm-delete:1:10",
-      message: { chat: { id: 1 }, message_id: 2 },
-    },
-    "ctx",
-  );
-  assert.equal(queuedItems.length, 0);
-  assert.equal(texts[3], "<b>⌛ Queue is empty.</b>");
-  assert.equal(notices[3], "Deleted from queue.");
 });
 
 test("Queue refresh rotates empty queue title", async () => {
@@ -2097,10 +2174,19 @@ test("Menu helpers build model, thinking, and status UI payloads", () => {
     thinkingMarkup.inline_keyboard[0]?.[0]?.callback_data,
     "menu:back",
   );
-  assert.equal(
-    thinkingMarkup.inline_keyboard.some((row) => row[0]?.text === "🟢 medium"),
-    true,
-  );
+  assert.deepEqual(thinkingMarkup.inline_keyboard.slice(1), [
+    [{ text: "off", callback_data: "thinking:set:off" }],
+    [
+      { text: "minimal", callback_data: "thinking:set:minimal" },
+      { text: "low", callback_data: "thinking:set:low" },
+      { text: "🟢 medium", callback_data: "thinking:set:medium" },
+    ],
+    [
+      { text: "high", callback_data: "thinking:set:high" },
+      { text: "xhigh", callback_data: "thinking:set:xhigh" },
+      { text: "max", callback_data: "thinking:set:max" },
+    ],
+  ]);
   const statusMarkup = buildStatusReplyMarkup(modelA, "medium", 3);
   const statusCallbackData = statusMarkup.inline_keyboard.flatMap((row) =>
     row.map((button) => button.callback_data),
@@ -2207,7 +2293,7 @@ test("Section callback actions preserve callback thread target", async () => {
 
 test("Settings menu labels proactive push with state text", () => {
   assert.deepEqual(
-    buildTelegramSettingsMenuReplyMarkup(true, false, "hidden", "hidden")
+    buildTelegramSettingsMenuReplyMarkup(true, false, "manual", "hidden")
       .inline_keyboard[5],
     [
       {
@@ -2217,7 +2303,7 @@ test("Settings menu labels proactive push with state text", () => {
     ],
   );
   assert.deepEqual(
-    buildTelegramSettingsMenuReplyMarkup(false, false, "hidden", "hidden")
+    buildTelegramSettingsMenuReplyMarkup(false, false, "manual", "hidden")
       .inline_keyboard[5],
     [
       {
@@ -2230,7 +2316,7 @@ test("Settings menu labels proactive push with state text", () => {
 
 test("Settings menu exposes time injection mode selection", () => {
   assert.deepEqual(
-    buildTelegramSettingsMenuReplyMarkup(false, false, "hidden", "hidden")
+    buildTelegramSettingsMenuReplyMarkup(false, false, "manual", "hidden")
       .inline_keyboard[6],
     [
       {
@@ -2240,7 +2326,7 @@ test("Settings menu exposes time injection mode selection", () => {
     ],
   );
   assert.deepEqual(
-    buildTelegramSettingsMenuReplyMarkup(false, false, "hidden", "interval")
+    buildTelegramSettingsMenuReplyMarkup(false, false, "manual", "interval")
       .inline_keyboard[6],
     [
       {
@@ -2271,8 +2357,8 @@ test("Settings menu exposes time injection mode selection", () => {
 
 test("Settings menu marks voice mode selection with model-style dot", () => {
   assert.deepEqual(
-    buildVoiceReplyModeSettingsReplyMarkup("hidden", false).inline_keyboard[1],
-    [{ text: "🟢 hidden", callback_data: "settings:set:voice-reply:hidden" }],
+    buildVoiceReplyModeSettingsReplyMarkup("manual", false).inline_keyboard[1],
+    [{ text: "🟢 manual", callback_data: "settings:set:voice-reply:manual" }],
   );
   assert.deepEqual(
     buildVoiceReplyModeSettingsReplyMarkup("mirror").inline_keyboard[2],
@@ -2282,14 +2368,14 @@ test("Settings menu marks voice mode selection with model-style dot", () => {
     buildTelegramSettingsMenuReplyMarkup(
       false,
       false,
-      "hidden",
+      "manual",
       "hidden",
       undefined,
       false,
     ).inline_keyboard[3],
     [
       {
-        text: "👄 Voice reply: hidden",
+        text: "👄 Voice reply: manual",
         callback_data: "settings:open:voice-reply",
       },
     ],
@@ -2307,7 +2393,7 @@ test("Settings menu marks voice mode selection with model-style dot", () => {
 });
 
 test("Settings menu rehydrates expired state before persisting and rendering voice mode", async () => {
-  let mode: "hidden" | "mirror" | "always" | undefined;
+  let mode: "manual" | "mirror" | "always" | undefined;
   let configured = false;
   const events: string[] = [];
   const runtime = createTelegramSettingsMenuRuntime({
@@ -2339,7 +2425,7 @@ test("Settings menu rehydrates expired state before persisting and rendering voi
     getAssistantRenderingMode: () => "rich" as const,
     getActivityVerbosity: () => "quiet" as const,
     getTimeInjectionMode: () => "hidden",
-    getVoiceReplyMode: () => mode ?? "hidden",
+    getVoiceReplyMode: () => mode ?? "manual",
     isVoiceReplyModeConfigured: () => configured,
     isAutomaticThreadCleanupEnabled: () => true,
     setProactivePushEnabled: async () => {},
@@ -2387,8 +2473,8 @@ test("Settings submenu headings include current values", () => {
     /^<b>🕒 Time injection mode:<\/b> <code>interval<\/code>/,
   );
   assert.match(
-    buildVoiceReplyModeSettingsText("hidden", false),
-    /^<b>👄 Voice reply mode:<\/b> <code>hidden<\/code>/,
+    buildVoiceReplyModeSettingsText("manual", false),
+    /^<b>👄 Voice reply mode:<\/b> <code>manual<\/code>/,
   );
 });
 

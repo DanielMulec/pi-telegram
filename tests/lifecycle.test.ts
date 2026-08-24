@@ -454,9 +454,9 @@ test("Lifecycle helpers register pi hooks and delegate to handlers", async () =>
     onSessionCompact: () => {
       events.push("session-compact");
     },
-    onBeforeAgentStart: () => {
+    onBeforeAgentStart: (event) => {
       events.push("before-agent-start");
-      return { systemPrompt: "prompt" };
+      return { systemPrompt: event.systemPrompt };
     },
     onModelSelect: () => {
       events.push("model-select");
@@ -521,7 +521,7 @@ test("Lifecycle helpers register pi hooks and delegate to handlers", async () =>
   const beforeAgentStartResult = await getRequiredLifecycleHandler(
     harness.handlers,
     "before_agent_start",
-  )({}, ctx);
+  )({ systemPrompt: ["base", "project context"] }, ctx);
   await getRequiredLifecycleHandler(harness.handlers, "model_select")({}, ctx);
   await getRequiredLifecycleHandler(harness.handlers, "agent_start")({}, ctx);
   await getRequiredLifecycleHandler(harness.handlers, "tool_execution_start")(
@@ -543,7 +543,9 @@ test("Lifecycle helpers register pi hooks and delegate to handlers", async () =>
   );
   await getRequiredLifecycleHandler(harness.handlers, "agent_end")({}, ctx);
   await getRequiredLifecycleHandler(harness.handlers, "agent_settled")({}, ctx);
-  assert.deepEqual(beforeAgentStartResult, { systemPrompt: "prompt" });
+  assert.deepEqual(beforeAgentStartResult, {
+    systemPrompt: ["base", "project context"],
+  });
   assert.deepEqual(events, [
     "session-start",
     "session-shutdown",

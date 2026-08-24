@@ -595,7 +595,7 @@ test("Turn runtime omits voice context when reply mode is only the implicit defa
   >({
     allocateQueueOrder: () => 1,
     downloadFile: async (_fileId, fileName) => `/tmp/${fileName}`,
-    getVoiceReplyMode: () => "hidden",
+    getVoiceReplyMode: () => "manual",
   });
   const turn = await buildTurn([
     {
@@ -782,7 +782,7 @@ test("Voice reply mode tags turn with voice-required when mode is always", async
   );
 });
 
-test("Voice reply mode mirror with no voice file stays on the hidden text path", async () => {
+test("Voice reply mode mirror with no voice file stays on the manual text path", async () => {
   const turn = await buildTelegramPromptTurnRuntime({
     telegramPrefix: "[telegram]",
     messages: [{ message_id: 17, chat: { id: 5 } }],
@@ -828,7 +828,7 @@ test("Voice reply mode always with voice file present sets voiceReplyRequired on
   );
 });
 
-test("Turn runtime keeps hidden mode silent without voice flags", async () => {
+test("Turn runtime keeps manual mode silent without voice flags", async () => {
   const turn = await buildTelegramPromptTurnRuntime({
     telegramPrefix: "[telegram]",
     messages: [{ message_id: 16, chat: { id: 5 } }],
@@ -845,7 +845,7 @@ test("Turn runtime keeps hidden mode silent without voice flags", async () => {
       },
     ],
     inferImageMimeType: () => undefined,
-    voiceReplyMode: "hidden",
+    voiceReplyMode: "manual",
   });
   assert.equal(turn.voiceReplyPreferred, false);
   assert.equal(turn.voiceReplyRequired, false);
@@ -1182,9 +1182,9 @@ test("Turn helpers assemble prompt turns with text, ids, history, and image payl
   });
 });
 
-test("getTelegramVoiceReplyMode returns default when no config provided", () => {
-  assert.equal(getTelegramVoiceReplyMode(), "hidden");
-  assert.equal(getTelegramVoiceReplyMode(undefined), "hidden");
+test("getTelegramVoiceReplyMode returns manual when no config provided", () => {
+  assert.equal(getTelegramVoiceReplyMode(), "manual");
+  assert.equal(getTelegramVoiceReplyMode(undefined), "manual");
 });
 
 test("getTelegramVoiceReplyMode reads frozen config with valid replyMode", () => {
@@ -1198,7 +1198,7 @@ test("getTelegramVoiceReplyMode ignores frozen config with invalid replyMode", (
   const frozenConfig = Object.freeze({
     voice: { replyMode: "bad-mode" as any },
   });
-  assert.equal(getTelegramVoiceReplyMode(frozenConfig), "hidden");
+  assert.equal(getTelegramVoiceReplyMode(frozenConfig), "manual");
 });
 
 test("getTelegramVoiceReplyMode reads config voice.replyMode", () => {
@@ -1212,17 +1212,17 @@ test("getTelegramVoiceReplyMode reads config voice.replyMode", () => {
   );
   assert.equal(
     getTelegramVoiceReplyMode({ voice: { replyMode: "manual" } }),
-    "hidden",
+    "manual",
   );
 });
 
-test("getTelegramVoiceReplyMode falls back to hidden for invalid, legacy, or missing config", () => {
+test("getTelegramVoiceReplyMode falls back to manual for invalid or missing config", () => {
   assert.equal(
     getTelegramVoiceReplyMode({ voice: { replyMode: "invalid" as any } }),
-    "hidden",
+    "manual",
   );
-  assert.equal(getTelegramVoiceReplyMode({ voice: {} }), "hidden");
-  assert.equal(getTelegramVoiceReplyMode({}), "hidden");
-  assert.equal(getTelegramVoiceReplyMode(null as any), "hidden");
-  assert.equal(getTelegramVoiceReplyMode(undefined), "hidden");
+  assert.equal(getTelegramVoiceReplyMode({ voice: {} }), "manual");
+  assert.equal(getTelegramVoiceReplyMode({}), "manual");
+  assert.equal(getTelegramVoiceReplyMode(null as any), "manual");
+  assert.equal(getTelegramVoiceReplyMode(undefined), "manual");
 });

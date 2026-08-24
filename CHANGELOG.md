@@ -2,6 +2,157 @@
 
 > Each release keeps at most 8 outcome records of at most 512 characters.
 
+## 0.38.0: Coherent Voice Reply Policy
+
+- `Voice Reply Policy`: Renames the default user-facing `hidden` mode to `manual` while retaining `hidden` as a read-only configuration and callback compatibility alias. `manual`, `mirror`, and `always` remain the complete policy set: explicit `telegram_voice`, modality mirroring, or automatic voice replacement.
+- `Voice Provider Contract`: Removes the redundant `voice.sendTranscript` configuration, `getTelegramVoiceSendTranscript()` public helper, provider-returned `transcriptText`, and voice-caption path. Synthesis providers now return only an OGG/Opus path or `undefined`; text-plus-voice remains an explicit agent composition rather than a parallel automatic policy.
+
+## 0.37.2: Follower Recovery Delivery Hotfix
+
+- `Follower Recovery Delivery`: Holds follower Bot API calls behind a bounded registration wait when heartbeat recovery temporarily clears local authority, then sends once with the restored exact generation. Calls still fail closed if registration is not restored, and acknowledgement ambiguity remains non-retryable.
+
+## 0.37.1: Settings Manager Compatibility Hotfix
+
+- `Menu Compatibility`: Keeps `/start`, model, and queue menu rendering compatible with Pi settings-manager implementations that do not expose `reload()`. Hosts with reload retain explicit refresh behavior; other hosts use the freshly constructed settings snapshot instead of failing with `settingsManager.reload is not a function`.
+
+## 0.37.0: Journal-Owned Telegram Admission
+
+- `Configuration-Only State`: Moves the per-profile polling cursor out of `telegram.json` into atomic durable journal revisions, including cursor-only initial sync, compaction, reconstruction, and recovery. A journal-first one-shot cutover removes legacy config state idempotently, exact bot/profile fences remain enforced, status reads journal authority, and unsafe downgrade now fails closed.
+
+## 0.36.11: At-Most-Once Prompt Dispatch Hotfix
+
+- `At-Most-Once Prompt Dispatch`: Commits each exact durable Telegram receipt synchronously before Pi model admission and blocks dispatch when that commit fails, closing the session/process-replacement replay window that could deliver an already-processed old prompt again; the narrow commit-before-admission crash boundary now favors no duplicate over retry.
+
+## 0.36.10: Transport-Fenced Typing Hotfix
+
+- `Typing Authority Fence`: Starts and continues Telegram typing activity only while the Pi instance has direct ownership or a live follower registration, stopping quietly when authority disappears so classic takeover cannot re-arm a stale loop or flood diagnostics with expected follower-registration errors.
+
+## 0.36.9: Telegram Status And Generated Controls Hotfix
+
+- `Classic Takeover Status`: Keeps a classic-mode client visibly `disconnected` after another Pi instance takes Telegram ownership, preventing stale transport-side activity errors from overriding the authoritative connection state.
+- `Generated Button Surfaces`: Makes vertical full-width controls the phone-readable default, earns multi-column rows only for compact labels or emoji-only spatial controls, encourages concise semantic labels, and requires safe 2–6 button controls whenever a Telegram reply asks a bounded blocking confirmation or choice instead of leaving an avoidable prose-only feedback step.
+
+## 0.36.8: Durable Journal Recovery
+
+- `Durable Journal Recovery`: Restricts age cleanup to UUID-prefixed downloads, repairs missing or revisionless snapshots from validated segment evidence, and otherwise quarantines the snapshot plus segments before publishing a fresh journal, keeping `/telegram-connect` operational with informational recovery evidence instead of manual JSON repair.
+
+## 0.36.7: Context-Aware Proactive Controls
+
+- `Proactive Prompt Buttons`: Plans valid top-level `telegram_button` comments before local/autonomous assistant segments enter Rich or HTML proactive delivery, preserving the ordinary callback store and renderer path instead of silently hiding correct controls.
+- `Connection-Aware Agent Context`: Successful setup/connect and disconnect commands queue a hidden connection-state note for delivery with the next agent turn without triggering one. Connected system guidance and Telegram Skills now distinguish transport capability from user intent, reserving proactive Telegram controls for Telegram-originated turns or explicit requests.
+
+## 0.36.6: Orphan Journal Guard
+
+- `Orphan Journal Guard`: Rejects a missing journal snapshot when immutable revision segments still exist, preventing later admission from replacing uncertain durable authority with a new revisionless snapshot while preserving snapshot-first compaction and fail-closed recovery.
+- `Voice Configuration Guidance`: Guides agents from voice-configuration requests to provider-neutral `telegram.json` command templates, ordered STT fallbacks, OGG/Opus validation, and companion-provider alternatives while preserving `hidden` as the useful default for explicit `telegram_voice` delivery.
+
+## 0.36.5: Separated Tool Errors
+
+- `Separated Tool Errors`: Prefixes Telegram attachment and direct-message Tool failures with one normalized leading newline so Pi renders error evidence on a visually separated line beneath the Tool name without changing the underlying diagnostic text.
+
+## 0.36.4: Async Host Settings Compatibility
+
+- `Async Host Settings`: Normalizes synchronous or asynchronous settings construction plus legacy enabled-model methods or generic `get` / `set` services at the Pi adapter boundary before model-menu reads and scoped-model persistence, improving compatible-host interoperability without changing native Pi behavior or weakening required `agent_settled` semantics.
+
+## 0.36.3: Ordered Prompt Compatibility
+
+- `Prompt Compatibility`: Preserves plain and ordered-block system prompts across Pi-compatible runtimes; Telegram guidance remains a distinct block when the host supplies blocks, while unavailable transport strips only Telegram tool metadata without collapsing unrelated prompt context.
+
+## 0.36.2: Provider-Compatible Controls
+
+- `Provider-Compatible Bind Schema`: Exposes `telegram_bind` through one top-level JSON object schema while retaining runtime enforcement of mutually exclusive install and invocation forms, avoiding providers that reject top-level union schemas before any tool call can run.
+- `Reaction Shortcut Naming`: Removes obsolete reaction-action labels from setup guidance now that queue reaction semantics use their current naming.
+- `Compact Thinking Picker`: Keeps `off` on a distinct full-width row and groups the six ordered reasoning intensities into two three-button rows, reducing menu height without changing thinking-level values or callbacks.
+
+## 0.36.1: Adaptive Control Surfaces
+
+- `Adaptive Button Literal`: Replaces binary JSON-or-CML parsing with one strict-JSON-first matrix grammar over a shared button AST. Named JSON objects and positional CML cells may coexist in one matrix or row, commas are optional only between completed elements, every compression step preserves semantics, and malformed comments reject atomically without registering partial callbacks.
+- `Trusted Release Publication`: Makes tag releases depend on reusable full validation, exact tag/package/lock/changelog identity, npm Trusted Publisher provenance, idempotent existing-version checks, public package and tarball verification, and one workflow-owned GitHub Release path without npm tokens.
+- `Consistent Access Denial`: Centralizes unauthorized copy so Guest Mode and private messages render `🚫 Access denied.` with equivalent explicit bold emphasis through HTML-capable surfaces, while callback popups use the same emoji and plain copy without pretending to support rich text.
+- `Destructive Skip State`: Changes the active queue Skip selector from yellow to red and records the indicator in the UI registry, making deferred prompt removal visually distinct from Priority, Scoped, and other elevated but non-destructive states.
+- `Worker Cancellation Fence`: Makes Generative App workers acknowledge child-process abort handling before parent termination, with a bounded forced fallback for synchronously blocked methods, preventing Linux CI load from orphaning a cancelled process long enough to commit its delayed side effect.
+- `Capability App Routing`: Telegram interaction now prefers an already-advertised capability-owned Generative App for repeated controls before synthesizing one-shot prompt buttons, while the bridge remains generic and neither discovers capability-specific apps nor owns their state or identities.
+- `Hybrid Surface Routing`: Generated Control Surface and Generative Apps now cross-route over one logical button matrix and shared JSON/CML runtime notation: ephemeral agent composition stays separate from reusable scripts, while one app view may combine deterministic bound methods with ordinary model-mediated prompts and no third button Skill is introduced.
+
+## 0.36.0: Generative Apps
+
+- `Generative App Kernel`: Adds `telegram_bind` for canonical `.mjs` install/replace/invoke with mandatory `init`, strict JSON, bounded output/processes, transactional snapshots, repaired partial-tail recovery, non-symlink root/app/module/source containment, and worker-isolated terminable methods. Lifecycle cancellation stops child processes and fences state commit; failed staging or `init` preserves the installed app.
+- `Inference Bypass`: Parses complete `app::method` and strict-JSON argument prompts after one-shot `tgbtn` resolution, invokes the installed app before Pi queue admission, plans returned Markdown/buttons through the current outbound surface, preserves native callbacks and ordinary prompts, marks successful controls, and fails malformed or unsuccessful bound actions without model fallback.
+- `Transition Fencing`: Serializes transitions with stable locks outside replaceable app directories, reclaims dead owners, reconciles current state from the last complete snapshot, and carries immutable installation generation plus revision on buttons. Replacement, stale callbacks, and lifecycle loss fail before method effects, state commit, or Telegram delivery.
+- `Compact Queue Controls`: Adds strict CML selected styles with atomic validation. Queue detail replaces Delete with independent Priority/Normal and Keep/Skip. Lane transitions append at the destination FIFO tail; Keep/Skip preserves position. Positive and negative reaction categories may coexist; Skip stays reversible, shows only its emoji, and wins at dispatch by dropping the marked head without inference and continuing.
+- `Generated Music Player`: Validates a capability-owned Generative App over the public Actor control surface while `pi-telegram` ships only the generic runtime. Live `ffplay` checks confirmed no-model-turn navigation, pause/play, seek, absolute volume, status, and stop with exact terminal Controls and no pending backlog. The app reports Actor availability and uses symmetric seven-button progress and volume scales.
+- `Dual Action Views`: Keeps fresh-message delivery as the simple default so prior interfaces and selected buttons remain visible, while `viewMode: "edit"` opts a method into replacing its callback message and keyboard. An explicit edit failure records diagnostics and sends one fresh view; automatic refresh remains a separate lifecycle slice.
+- `Direct Initial View`: During an active Telegram turn, `telegram_bind` plans and delivers successful output to the exact target, marks it displayed so the model does not repeat it, and supports `display: false`. Outside turns it returns exact output; delivery failure preserves the app result. Tool success, direct-display, and error text use one leading line break, and failed old-message restyling cannot turn a completed action into failure.
+- `Generative Apps Skill`: Adds an operating Skill for compiling repeated interaction into reusable standalone apps or bounded adapters with generated JSON button views. One surface may mix deterministic bound methods with ordinary model prompts; the Skill covers authorship, review, install/replace/invoke, stale actions, and validation while Generated Control Surface retains ephemeral model-mediated interfaces.
+
+## 0.35.2: Independent Surface Dimensions
+
+- `Horizontal Boundary`: Establishes eight controls as the Generated Control Surface phone-width UX maximum regardless of the parser's uncapped row grammar; nine or more controls must regroup, and six-to-eight remains limited to minimal position-bearing labels.
+- `Vertical Continuity`: Treats height independently from width so true spatial surfaces may preserve substantially more rows—including an `8×16` field—when coordinates and topology matter, while non-spatial button walls still yield to semantic grouping, progressive disclosure, or pagination.
+
+## 0.35.1: Semantic Ragged Control Layouts
+
+- `Row Composition`: Teaches Generated Control Surface to model Telegram controls as an ordered ragged sequence of independently sized semantic rows rather than filling a rectangular matrix: compact rows hold genuine peers, singleton rows isolate independent actions, and symmetry is admitted only when equal relationships or real spatial topology provide evidence for it.
+- `Layout Catalog`: Adds an adaptable shape vocabulary for singleton, binary peer, asymmetric staged, navigation-plus-collection, repeated text-pair, and true rectangular surfaces; agents infer task relationships first and must not force work into a preset shape.
+- `Layout Hierarchy`: Limits word-, phrase-, and icon-plus-text controls to two columns and moves additional choices into more semantic rows; denser rows remain reserved for short position-bearing glyphs or codes. Row widths vary intentionally, preserve structural reading order, forbid uniformity padding, and use rectangular grids only when spatial topology carries real meaning.
+
+## 0.35.0: Compact Matrix Literal
+
+- `Compact Wire Format`: Adds portable Compact Matrix Literal alongside JSON and attributes: `{value}` copies label to prompt, `{label|prompt}` separates them, top-level cells remain full-width, nested rows preserve horizontal grouping, and atom boundaries trim automatically.
+- `Literal Fidelity`: Preserves non-structural printable Unicode—including brackets, quotes, commas, colons, paths, and spaces—while decoding only `\|`, `\}`, and `\\`; unknown/trailing escapes, empty values, repeated separators, controls, malformed delimiters, empty rows, and deeper nesting fail closed before callback registration.
+- `Renderer-Owned Width`: Removes the artificial parser-level row-width cap because Telegram documents none, while bundled Skills keep five columns as the proven default, admit six through eight only for very short position-bearing labels, and direct wider surfaces toward regrouping. A dedicated portable standard owns grammar, JSON-first routing, conformance, and versioning.
+
+## 0.34.1: Compact Stateful Control Surfaces
+
+- `Prompt Compression`: Teaches Generated Control Surface to encode the smallest sufficient action delta—such as a coordinate, symbol, identifier, or short verb—when visible conversation establishes unambiguous state, while retaining stable identity when delivery or routing could separate action from context.
+- `Interaction State`: Keeps trivial state conversational, moves large or error-prone state to deterministic task-owned Markdown artifacts, delegates correctness-sensitive rules to small domain-owned transition implementations, and handles repeated clicks as current-state no-ops or selections without assuming transport-level disabled buttons.
+- `Five-Wide UX`: Treats five-column matrices as useful for position-bearing interaction only with short distinct labels, falls back to fewer columns when readability degrades, and proactively offers interactive surfaces when they materially reduce user effort rather than merely decorating a reply.
+
+## 0.34.0: Five-Wide Matrix Controls
+
+- `Button Matrix`: Expands compact nested JSON rows from one-to-three to one-to-five buttons for grids, keypads, palettes, games, and other position-bearing controls while preserving full-width top-level rows and existing object, attribute, flat-array, and plural-alias compatibility.
+- `Matrix Boundaries`: Keeps empty rows, rows of six or more buttons, malformed payloads, and deeper nesting fail closed before callback registration; published docs and bundled Skills now expose the five-button boundary.
+- `Interactive Surfaces`: Teaches Generated Control Surface to use five-wide position-bearing matrices for keypads, palettes, calendars, seat maps, directional controls, small games, and runnable demonstrations while keeping each continuation self-contained instead of inventing hidden application state.
+
+## 0.33.2: Structured Filesystem Surfaces
+
+- `Filesystem Ordering`: Sorts generated directory surfaces by visible directories, hidden directories, visible files, then hidden files, with alphabetical ordering inside each category before fixed ten-entry pagination.
+- `Surface Metadata`: Reuses compact status-style key-value rows for filesystem path and range metadata, with bold labels and inline-code values instead of middle-dot section separators or duplicated entry listings.
+
+## 0.33.1: Rendered Command Replies And Visible Compaction
+
+- `Command Rendering`: Restored the `/next` empty-queue emphasis by preserving its HTML source and forwarding `parseMode: "HTML"` through the command reply adapter, so command helpers select the renderer explicitly instead of leaking HTML or Markdown syntax as plain text.
+- `Compaction Visibility`: Reports `compacting` ahead of generic active or pending status and sends the same start/completion notices for observed automatic compaction as for manually requested compaction, while retaining queue blocking and deferred dispatch.
+
+## 0.33.0: Matrix Controls And Pinned Filesystem Navigation
+
+- `Button Matrix`: Extended `telegram_button` and its plural alias from flat arrays to JSON matrices: top-level objects remain full-width rows, while nested arrays intentionally group one to three peer controls horizontally; empty, oversized, or deeper rows fail closed without changing existing object, attribute, or flat-array behavior.
+- `Filesystem Navigation`: Stabilized Generated Control Surface directory layout: parent traversal is pinned as the first full-width row outside root, available Previous/Next controls share the next compact row, ten-entry pages follow as full-width rows, one JSON-matrix action carries the surface, visible text avoids duplicate plain or monospaced inventories unless user preference overrides it, Refresh is omitted by default, and numbered fallback preserves navigation when buttons are unavailable.
+- `Command Rendering`: Replaced the `/next` empty-queue response's leaked HTML tag with native Rich Markdown so Telegram renders emphasis instead of displaying `<b>` literally.
+
+## 0.32.0: Compact Button Arrays And Filesystem Surfaces
+
+- `Button Arrays`: Added JSON-array payloads to the canonical colon-free `telegram_button` action so one hidden comment can declare many ordered button rows; `telegram_buttons` is an exact plural alias, while existing single-object and double-quoted attribute forms remain valid.
+- `Filesystem Surface`: Made bare filesystem paths—including `/`—legitimate Generated Control Surface intents. Directory surfaces resolve fresh metadata, paginate large listings, preserve secret boundaries, and may use exact path-only button prompts with compact semantic file/folder labels.
+
+## 0.31.0: State-Derived Generated Control Surfaces
+
+- `Generated Control Surface`: Renamed the optional `control-surface` Skill to `generated-control-surface`, aligned its identity with the architectural primitive, and made Telegram routing evaluate it proactively when controls can materially shorten likely feedback without waiting for an explicit button request; decorative UI still resolves to zero controls.
+- `Late-Bound Interface`: Defined generated surfaces as `interface = f(state, capabilities, intent)`: ephemeral renderer projections that expose domain-owned state and agency under constitutional constraints without absorbing parallel state. Telegram remains the first renderer rather than the capability boundary.
+
+## 0.30.1: Priority Button Queue Hotfix
+
+- `Priority Queue`: Assistant-authored button callbacks now enter the sorted priority lane ahead of already queued default prompts, aligning the visible lightning marker with actual dispatch order while preserving callback deduplication and FIFO ordering within each lane.
+
+## 0.30.0: Generated Control Surfaces
+
+- `Generated Control Surface`: Replaced the CLI-bound Button Console with a transport-aware Control Surface Skill that proactively generates truthful contextual controls when they shorten feedback for workflows, stateful systems, navigation, Actor supervision, and decisions while preserving domain ownership, ordinary prompt authority, confirmation boundaries, and stateless regeneration.
+- `Action Markup`: Standardized `telegram_button` and `telegram_voice` on one colon-free action marker for both JSON and attribute payloads. Colon-prefixed forms are rejected instead of remaining a redundant compatibility syntax.
+
+## 0.29.0: Skill-First Agent Operation
+
+- `Bundled Skills`: Added discoverable `telegram-bridge` and `button-console` Skills through package metadata and source-checkout resource discovery. Stable turn, delivery, action, Threaded Mode, formatting, handler, and diagnosis guidance now lives in the bridge Skill, while Button Console provides optional evidence-backed CLI navigation.
+- `Model Context Contraction`: Removed the redundant `telegram_help` model tool and its repeated guidance implementation. Compact authority-aware prompts route agents to the bundled Skill, while disconnect/recovery now suppresses and restores only the two delivery tools without affecting foreign tools.
 ## 0.28.0-fork.1: Session Membrane Acquisition
 
 - `Session Actions`: Telegram companion commands now acquire a fresh Pi command context through the public `sendUserMessage` → registered-command path, exposing only fenced lifecycle actions and read-only current-session accessors.

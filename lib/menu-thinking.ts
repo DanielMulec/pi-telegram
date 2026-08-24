@@ -128,13 +128,14 @@ export function buildThinkingMenuReplyMarkup(
   currentThinkingLevel: ThinkingLevel,
 ): TelegramReplyMarkup {
   const rows = [[{ text: "⬆️ Main menu", callback_data: "menu:back" }]];
+  const levelButtons = THINKING_LEVELS.map((level) => ({
+    text: level === currentThinkingLevel ? `🟢 ${level}` : level,
+    callback_data: `thinking:set:${level}`,
+  }));
   rows.push(
-    ...THINKING_LEVELS.map((level) => [
-      {
-        text: level === currentThinkingLevel ? `🟢 ${level}` : level,
-        callback_data: `thinking:set:${level}`,
-      },
-    ]),
+    levelButtons.slice(0, 1),
+    levelButtons.slice(1, 4),
+    levelButtons.slice(4, 7),
   );
   return { inline_keyboard: rows };
 }

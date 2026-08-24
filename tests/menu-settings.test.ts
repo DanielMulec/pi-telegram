@@ -66,8 +66,8 @@ test("Settings descriptions follow visible control order", () => {
       buildActivityVerbositySettingsReplyMarkup("verbose"),
     ],
     [
-      buildVoiceReplyModeSettingsText("hidden"),
-      buildVoiceReplyModeSettingsReplyMarkup("hidden"),
+      buildVoiceReplyModeSettingsText("manual"),
+      buildVoiceReplyModeSettingsReplyMarkup("manual"),
     ],
     [
       buildTimeInjectionModeSettingsText("interval"),
@@ -89,7 +89,7 @@ test("Settings menu text and reply markup expose built-in controls", () => {
   const markup = buildTelegramSettingsMenuReplyMarkup(
     true,
     false,
-    "hidden",
+    "manual",
     "hidden",
     undefined,
     false,
@@ -115,7 +115,7 @@ test("Settings menu text and reply markup expose built-in controls", () => {
   assert.equal(markup.inline_keyboard[2]?.[0]?.text, "🧾 Rendering: rich");
   assert.equal(
     markup.inline_keyboard[3]?.[0]?.text,
-    "👄 Voice reply: hidden",
+    "👄 Voice reply: manual",
   );
   assert.equal(markup.inline_keyboard[4]?.[0]?.text, "🔬 Activity: quiet");
   assert.equal(markup.inline_keyboard[5]?.[0]?.text, "📌 Proactive push: on");
@@ -169,9 +169,9 @@ test("Settings detail markups show active values", () => {
     "🟢 mirror",
   );
   assert.equal(
-    buildVoiceReplyModeSettingsReplyMarkup("hidden", false)
+    buildVoiceReplyModeSettingsReplyMarkup("manual", false)
       .inline_keyboard[1]?.[0]?.text,
-    "🟢 hidden",
+    "🟢 manual",
   );
 });
 
@@ -195,7 +195,7 @@ test("Settings callback action mutates voice, time, and proactive settings", asy
   const calls: string[] = [];
   const deps = {
     isProactivePushEnabled: () => false,
-    getVoiceReplyMode: () => "hidden" as const,
+    getVoiceReplyMode: () => "manual" as const,
     isVoiceReplyModeConfigured: () => true,
     getTimeInjectionMode: () => "hidden" as const,
     isAutomaticThreadCleanupEnabled: () => true,
@@ -217,9 +217,9 @@ test("Settings callback action mutates voice, time, and proactive settings", asy
       calls.push(`activity:${verbosity}`);
     },
     setVoiceReplyMode: async (
-      mode: "hidden" | "mirror" | "always" | undefined,
+      mode: "manual" | "mirror" | "always" | undefined,
     ) => {
-      calls.push(`voice:${mode ?? "hidden"}`);
+      calls.push(`voice:${mode ?? "manual"}`);
     },
     setTimeInjectionMode: async (mode: "hidden" | "always" | "interval") => {
       calls.push(`time:${mode}`);
@@ -238,7 +238,7 @@ test("Settings callback action mutates voice, time, and proactive settings", asy
   assert.equal(
     await handleTelegramSettingsMenuCallbackAction(
       "q1",
-      "settings:set:voice-reply:hidden",
+      "settings:set:voice-reply:manual",
       deps,
     ),
     true,
@@ -297,9 +297,9 @@ test("Settings callback action mutates voice, time, and proactive settings", asy
   );
 
   assert.deepEqual(calls, [
-    "voice:hidden",
-    "update:<b>👄 Voice reply mode:</b> <code>hidden</code>",
-    "answer:Voice reply mode: hidden",
+    "voice:manual",
+    "update:<b>👄 Voice reply mode:</b> <code>manual</code>",
+    "answer:Voice reply mode: manual",
     "time:hidden",
     "update:<b>🕒 Time injection mode:</b> <code>hidden</code>",
     "answer:Time injection: hidden",
@@ -339,7 +339,7 @@ test("Settings runtime opens menus and rehydrates stale callback state", async (
       calls.push("reload-config");
     },
     isProactivePushEnabled: () => true,
-    getVoiceReplyMode: () => "hidden",
+    getVoiceReplyMode: () => "manual",
     isVoiceReplyModeConfigured: () => true,
     getTimeInjectionMode: () => "hidden",
     isAutomaticThreadCleanupEnabled: () => true,

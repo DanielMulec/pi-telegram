@@ -6,9 +6,19 @@ Voice messages flow through an **inbound transcription → outbound voice reply*
 
 1. **Inbound:** A voice message arrives via Telegram. Inbound handlers transcribe it to text.
 2. **Processing:** The transcription becomes the agent prompt. The bridge tags the turn if it originated from voice.
-3. **Outbound:** If voice replies are enabled, the agent's text response is converted to voice and sent back. No text draft appears in Telegram during generation.
+3. **Outbound:** When automatic voice delivery is selected or the agent emits an explicit `telegram_voice` action, the agent's text is converted to voice and sent back.
 
 The bridge owns Telegram transport, queue integration, reply-mode policy, preview suppression, fallback text delivery, and Settings UI. Provider extensions own STT/TTS calls, speech rewriting, provider-specific menus, transcript preference, and OGG/Opus conversion.
+
+### Choose an integration path
+
+Use the smallest path that fits the operator's available capabilities:
+
+1. **`telegram.json` command templates:** Compose trusted local executables through `inboundHandlers` and `outboundHandlers`. This works equally well for local models and API-backed scripts, supports ordered STT fallbacks, and requires no companion extension.
+2. **Companion extension:** Register programmatic STT/TTS providers when installation, provider-owned settings, lifecycle integration, or zero-config reuse justifies code.
+3. **Hybrid:** Keep explicit operator command templates first and let installed providers supply progressive fallbacks.
+
+pi-telegram does not catalog speech providers. Configuration agents should discover applicable Skills or trusted local executables, verify required environment variables by presence without exposing values, preserve unrelated `telegram.json` state, ensure TTS ends as OGG/Opus, and test each stage before the live Telegram path. `hidden` remains the safe and useful default: it disables only automatic voice replies, while explicit `telegram_voice` actions continue to use the configured synthesis pipeline.
 
 ## Voice Detection
 
@@ -33,12 +43,12 @@ Voice provider extensions can also register STT backends with `registerTelegramV
 
 ## Voice Reply Policy
 
-The bridge decides **when** to reply with voice from `voice.replyMode` in `TelegramConfig` (stored in `telegram.json`). Missing, invalid, `hidden`, and legacy `manual` values resolve to the silent `hidden` default.
+The bridge decides **when** to reply with voice from `voice.replyMode` in `TelegramConfig` (stored in `telegram.json`). Missing and invalid values resolve to the `manual` default; the former `hidden` value remains a read-only compatibility alias for `manual`.
 
 ### Modes
 
-- **`hidden` (default):** no `voice.replyMode` is stored and no automatic voice context is added; explicit agent-authored `telegram_voice` actions still work.
-- **`mirror`:** voice/audio input activates automatic voice delivery. Text input follows `hidden` behavior.
+- **`manual` (default):** no `voice.replyMode` is stored and no automatic voice context is added; explicit agent-authored `telegram_voice` actions still work.
+- **`mirror`:** voice/audio input activates automatic voice delivery. Text input follows `manual` behavior.
 - **`always`:** every Telegram turn activates automatic voice delivery.
 
 **Warning:** In `always` mode, the bridge transparently intercepts ALL text replies and converts them to voice on success. Users will only receive voice messages when voice generation succeeds. If voice generation fails, the bridge falls back to sending the planned text reply.
@@ -60,7 +70,7 @@ A voice extension may combine three public seams:
 
 - `registerTelegramVoiceTranscriptionProvider()` for inbound STT fallback on voice/audio files
 - `registerTelegramVoiceSynthesisProvider()` for outbound TTS/synthesis fallback to Telegram voice messages
-- `registerTelegramSection()` for provider-specific Telegram UI such as voice, language, style, transcript, or provider on/off controls
+- `registerTelegramSection()` for provider-specific Telegram UI such as voice, language, style, or provider on/off controls
 
 The reply policy itself remains a built-in pi-telegram setting (`voice.replyMode`) rather than a provider-owned menu.
 
@@ -71,10 +81,8 @@ Voice synthesis provider extensions register themselves through `registerTelegra
 - Text optimisation / speech-style rewriting
 - Adding speech tags (when desired)
 - Running TTS + ffmpeg conversion to OGG/Opus
-- Deciding whether to return `transcriptText` at all based on the bridge-owned `voice.sendTranscript` preference when the provider has access to the current Telegram config
-- `transcriptText` (when returned) is attached by the bridge as the voice message **caption** only. Separate transcript messages are no longer sent.
 
-The bridge shows a `record_voice` action while delivering and sends the final audio with Telegram `sendVoice`. When a provider returns `transcriptText`, the bridge attaches it as the voice caption.
+The bridge shows a `record_voice` action while delivering and sends the final audio with Telegram `sendVoice`.
 
 Providers can implement `getVoicePromptContribution(view)` to inject voice-specific instructions into voice-tagged prompts (for example: "Reply only with the spoken text"). The bridge appends the first non-empty provider contribution when `mirror` or `always` mode tags the turn.
 
@@ -85,7 +93,6 @@ The provider receives the raw agent text plus optional `{ lang?, rate? }`.
 It must return one of:
 
 - `string` — path to a ready `.ogg` or `.opus` file
-- `{ audioPath: string, transcriptText?: string }` — `audioPath` must be OGG/Opus. When `transcriptText` is present it is attached as the voice message **caption**. Providers should treat pi-telegram's `voice.sendTranscript` as the bridge-owned transcript preference instead of inventing a second reply-policy UI.
 - `undefined` — skip this text block
 
 **Important:** Providers are fully responsible for producing a clean, TTS-optimised native voice file. The bridge may also run configured outbound voice command templates for users who prefer process-boundary handlers instead of provider extensions.
@@ -96,7 +103,7 @@ Registration returns a disposer function for cleanup. Stable provider registrati
 
 ## Outbound Voice Handlers
 
-Users can also configure `outboundHandlers` with `type: "voice"` in `telegram.json`. This is the command-template path for TTS without a provider extension. Reply modes (`hidden`, `mirror`, `always`) affect these handlers the same way they affect providers: explicit `telegram_voice` blocks and automatic mirror/always interception both produce a voice reply plan, then delivery tries configured outbound voice handlers first and registered synthesis providers as progressive fallbacks.
+Users can also configure `outboundHandlers` with `type: "voice"` in `telegram.json`. This is the command-template path for TTS without a provider extension. Reply modes (`manual`, `mirror`, `always`) affect these handlers the same way they affect providers: explicit `telegram_voice` blocks and automatic mirror/always interception both produce a voice reply plan, then delivery tries configured outbound voice handlers first and registered synthesis providers as progressive fallbacks.
 
 Voice handlers receive the text on stdin in composed pipelines and can use `{text}`, `{lang}`, `{rate}`, `{mp3}`, and `{ogg}` placeholders. Set `output` to `"ogg"` or another placeholder name when the template writes to a known path:
 
@@ -118,31 +125,6 @@ Voice handlers receive the text on stdin in composed pipelines and can use `{tex
 
 Priority for outbound voice delivery is: configured `outboundHandlers` with `type: "voice"` in their `telegram.json` order, then programmatic `voice` outbound handlers, then registered voice synthesis providers. Provider extensions are the zero-config tail of the same pipeline: they handle voice when no explicit configured handler succeeds, but they do not override operator-configured handlers. If multiple providers are registered, only one handles a given voice reply: the first provider that returns a valid `.ogg`/`.opus` artifact wins. Providers that return `undefined` explicitly pass to the next provider; providers that throw or return invalid output are recorded and the next fallback is tried.
 
-### Provider with transcript caption (controlled by user toggle)
-
-When the user's "Send Transcript" toggle is ON, return the clean spoken text as `transcriptText`. The bridge attaches it as the caption on the voice message. When the toggle is OFF, return only the audio path (no `transcriptText`).
-
-```typescript
-import {
-  getTelegramVoiceSendTranscript,
-  registerTelegramVoiceSynthesisProvider,
-} from "@llblab/pi-telegram/voice";
-
-registerTelegramVoiceSynthesisProvider(
-  async (text, options) => {
-    const rewritten = rewriteWithSpeechTags(text);
-    const audioPath = await myTTS(rewritten, { language: options?.lang });
-    const sendTranscript = getTelegramVoiceSendTranscript(
-      getCurrentTelegramConfigView(),
-    );
-    return sendTranscript ? { audioPath, transcriptText: text } : { audioPath };
-  },
-  { id: "my-voice-provider/tts" },
-);
-```
-
-`getCurrentTelegramConfigView()` represents whatever current `TelegramConfig` view your extension already owns or receives; pi-telegram does not require providers to read config directly. The bridge never sends a separate transcript message. Caption-only is the "ON" behavior.
-
 ### Surfacing provider diagnostics
 
 Voice provider extensions can record runtime events that appear in `/telegram-status` alongside pi-telegram's own events:
@@ -160,13 +142,13 @@ recordTelegramRuntimeEvent("voice-provider", new Error("TTS failed"), {
 
 ## Voice Extension Section
 
-Voice provider extensions can register a Voice Extension Section (settings UI) via `registerTelegramSection`. The section can expose provider-specific controls such as TTS voice, language, speech style, transcript behavior, or STT/TTS enablement. Reply mode is a core pi-telegram setting and belongs in the built-in Settings menu.
+Voice provider extensions can register a Voice Extension Section (settings UI) via `registerTelegramSection`. The section can expose provider-specific controls such as TTS voice, language, speech style, or STT/TTS enablement. Reply mode is a core pi-telegram setting and belongs in the built-in Settings menu.
 
 **Note on resume:** Because the previous automatic persistent re-registration system has been removed, extensions are responsible for re-registering their Voice Extension Section on `session_start` if they want the menu to survive a `pi resume`. See `registerTelegramSection` from `@llblab/pi-telegram/sections`.
 
 ## Prompt Guidance
 
-The bridge keeps voice prompt context compact, effective, and policy-owned. `hidden` and text-originated `mirror` turns add no voice line. Voice/audio-originated `mirror` turns and every `always` turn add exactly `[voice] delivery: automatic voice`, describing the current delivery environment without exposing the underlying mode matrix or an instruction list. The marker is appended after `[outputs]` when handler output exists, otherwise after `[attachments]`. Voice inputs also appear in `[attachments]` with their downloaded file names, MIME data, and handler output, so agents can infer concrete voice-file context from attachment metadata.
+The bridge keeps voice prompt context compact, effective, and policy-owned. `manual` and text-originated `mirror` turns add no voice line. Voice/audio-originated `mirror` turns and every `always` turn add exactly `[voice] delivery: automatic voice`, describing the current delivery environment without exposing the underlying mode matrix or an instruction list. The marker is appended after `[outputs]` when handler output exists, otherwise after `[attachments]`. Voice inputs also appear in `[attachments]` with their downloaded file names, MIME data, and handler output, so agents can infer concrete voice-file context from attachment metadata.
 
 Voice synthesis providers can supply prompt guidance through `getVoicePromptContribution(view)`, but provider text should stay optional and provider-specific. Reply-mode context belongs to pi-telegram.
 
@@ -214,4 +196,4 @@ The bridge reads `voice.replyMode` from the config when building a turn.
 
 ### Provider config
 
-Provider-specific settings (voice ID, language, speech style, transcript behavior, STT/TTS enablement) are owned by the voice provider extension. Reply mode is owned by pi-telegram's `voice.replyMode` and configured from the built-in pi-telegram Settings menu, not duplicated in provider UIs.
+Provider-specific settings (voice ID, language, speech style, STT/TTS enablement) are owned by the voice provider extension. Reply mode is owned by pi-telegram's `voice.replyMode` and configured from the built-in pi-telegram Settings menu, not duplicated in provider UIs.

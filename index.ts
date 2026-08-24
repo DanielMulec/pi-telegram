@@ -39,6 +39,7 @@ import * as Replies from "./lib/replies.ts";
 import * as Routing from "./lib/routing.ts";
 import * as Runtime from "./lib/runtime.ts";
 import * as Sections from "./lib/sections.ts";
+import * as Skills from "./lib/skills.ts";
 import * as Status from "./lib/status.ts";
 import * as Sync from "./lib/sync.ts";
 import * as TelegramApi from "./lib/telegram-api.ts";
@@ -60,6 +61,7 @@ const telegramBusProtocolIdentity =
 // --- Extension Runtime ---
 
 export default function (pi: Pi.ExtensionAPI) {
+  Skills.registerTelegramSkillDiscovery(pi);
   const piRuntime = Pi.createExtensionApiRuntimePorts(pi);
   const {
     getActiveTools,
@@ -132,6 +134,22 @@ export default function (pi: Pi.ExtensionAPI) {
         getProfileName: configStore.getActiveProfileName,
         getBotToken: configStore.getBotToken,
         getBotId: getTelegramBotId,
+        onRecovery(event) {
+          recordRuntimeEvent(
+            "recovery",
+            event.kind === "repaired"
+              ? "Telegram update journal was repaired automatically."
+              : "Telegram update journal was reset after its damaged files were quarantined.",
+            {
+              phase: "journal-auto-recovery",
+              recoveryKind: event.kind,
+              journalPath: event.path,
+              revision: event.revision,
+              quarantinePath: event.quarantinePath,
+              reason: event.reason,
+            },
+          );
+        },
         getQueueRuntimeIdentity() {
           return {
             instanceId: telegramInstanceId,
@@ -228,6 +246,8 @@ export default function (pi: Pi.ExtensionAPI) {
   const proactivePushChatIdGetter =
     Config.createTelegramProactivePushChatIdGetter(proactivePushTargetGetter);
   const buttonActionStore = Outbound.createTelegramButtonActionStore();
+  const planGenerativeAppOutput =
+    Outbound.createTelegramOutboundReplyPlanner(buttonActionStore);
   const pendingModelSwitchStore =
     Model.createPendingModelSwitchStore<
       Model.ScopedTelegramModel<ActivePiModel>
@@ -284,11 +304,6 @@ export default function (pi: Pi.ExtensionAPI) {
       persist: configStore.persist,
       markConfigChange: telegramSyncStateRuntime.markConfigChange,
     });
-  const persistTelegramPollingOffset =
-    Config.createTelegramPollingOffsetPersister(
-      configStore,
-      persistTelegramConfigWithSync,
-    );
   const {
     current: currentInstanceThreadRuntime,
     status: threadStatusProjectionRuntime,
@@ -334,6 +349,10 @@ export default function (pi: Pi.ExtensionAPI) {
     ),
     getInboundWorkerState() {
       return updateAdmissionRuntimeBinding.getActive()?.getState();
+    },
+    getAcceptedThroughUpdateId() {
+      return resolveTelegramUpdateJournalBinding()?.journal.read()
+        .acceptedThroughUpdateId;
     },
     getActiveSourceMessageIds: activeTurnRuntime.getSourceMessageIds,
     hasActiveTurn: activeTurnRuntime.has,
@@ -398,6 +417,8 @@ export default function (pi: Pi.ExtensionAPI) {
       },
       getRegistrationGeneration:
         telegramBusFollowerRegistrationState.getGeneration,
+      waitForRegistrationGeneration:
+        telegramBusFollowerRegistrationState.waitForGeneration,
       getForwardCommentBatchPosition:
         textGroupRuntime.getPreparedForwardingPosition,
       recordRuntimeEvent,
@@ -447,6 +468,15 @@ export default function (pi: Pi.ExtensionAPI) {
       BusApi.createTelegramAggregateTypingActionSender(telegramApiRuntime),
     updateStatus,
     isContextActive: telegramSessionContextStore.isCurrent,
+    getTransportAuthority() {
+      if (ownsTelegramDirectDelivery()) {
+        const epoch = getCurrentLeaderEpoch();
+        return epoch === undefined ? undefined : `direct:${epoch}`;
+      }
+      if (!telegramBusFollowerRegistrationState.isRegistered()) return undefined;
+      const generation = telegramBusFollowerRegistrationState.getGeneration();
+      return generation ? `follower:${generation}` : undefined;
+    },
     recordRuntimeEvent,
   });
   const currentModelRuntime = Model.createCurrentModelRuntime({
@@ -502,6 +532,16 @@ export default function (pi: Pi.ExtensionAPI) {
       getHandlers: configStore.getOutboundHandlers,
       recordRuntimeEvent,
     });
+  const invokeGenerativeAppBoundButtonAction =
+    Bindings.createTelegramGenerativeAppBoundButtonActionInvoker({
+      agentDir: Paths.resolveAgentDir(),
+      assertExecutionCurrent: Updates.assertTelegramUpdateExecutionCurrent,
+      getExecutionFence: Updates.getTelegramUpdateExecutionFence,
+      planOutput: planGenerativeAppOutput,
+      sendMarkdownReply,
+      editInteractiveMessage,
+      recordRuntimeEvent,
+    });
   const {
     activityRuntime,
     activityVerbosityRuntime,
@@ -527,6 +567,8 @@ export default function (pi: Pi.ExtensionAPI) {
         sendRichMessage,
         editMessage: editTelegramMessageText,
         getAssistantRenderingMode: configControls.getAssistantRenderingMode,
+        planButtonReply:
+          Outbound.createTelegramButtonReplyPlanner(buttonActionStore),
         execCommand: CommandTemplates.execCommandTemplate,
         getHandlers: configStore.getOutboundHandlers,
         recordRuntimeEvent,
@@ -760,6 +802,7 @@ export default function (pi: Pi.ExtensionAPI) {
     settingsMenuCallbackHandler: settingsMenuRuntime.handleCallbackQuery,
     sectionRegistry,
     buttonActionStore,
+    invokeBoundButtonAction: invokeGenerativeAppBoundButtonAction,
     inboundHandlerRuntime,
     threadStore,
     updateStatus,
@@ -970,13 +1013,35 @@ export default function (pi: Pi.ExtensionAPI) {
       hasBotToken: configStore.hasBotToken,
       deleteWebhook,
       getUpdates,
-      persistConfig: persistTelegramPollingOffset,
+      persistConfig: persistTelegramConfigWithSync,
       prepareUpdateBatch: textGroupRuntime.prepareUpdateBatch,
       journal: {
-        appendBatch(updates) {
+        appendBatch(updates, acceptedThroughUpdateId) {
           return updateAdmissionLifecycleRuntime.appendBatch(
             updates as Journal.TelegramJournaledUpdate[],
+            acceptedThroughUpdateId,
           );
+        },
+        getAcceptedThroughUpdateId() {
+          return resolveTelegramUpdateJournalBinding()?.journal.read()
+            .acceptedThroughUpdateId;
+        },
+        async prepareCursorCutover() {
+          const binding = resolveTelegramUpdateJournalBinding();
+          if (!binding) {
+            throw new Error("Telegram update journal binding is unavailable.");
+          }
+          await Polling.cutOverTelegramPollingCursor({
+            getLegacyCursor: configStore.getLegacyPollingCursor,
+            readJournal: binding.journal.read,
+            publishJournalCursor(acceptedThroughUpdateId) {
+              binding.journal.appendBatch([], acceptedThroughUpdateId);
+            },
+            async removeLegacyCursor() {
+              configStore.removeLegacyPollingCursor();
+              await persistTelegramConfigWithSync();
+            },
+          });
         },
         getEntryCount: updateAdmissionLifecycleRuntime.getJournalEntryCount,
         signalWorker: updateAdmissionLifecycleRuntime.signal,
@@ -1220,6 +1285,7 @@ export default function (pi: Pi.ExtensionAPI) {
 
   Bindings.registerTelegramCommandsAndTools({
     pi,
+    agentDir: Paths.resolveAgentDir(),
     configStore,
     persistConfig: persistTelegramConfigWithSync,
     setup,

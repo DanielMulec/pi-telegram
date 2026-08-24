@@ -436,6 +436,11 @@ async function buildTelegramOutboundAttachmentViews(options: {
   return pendingAttachments;
 }
 
+function formatTelegramOutboundToolError(error: unknown): Error {
+  const message = error instanceof Error ? error.message : String(error);
+  return new Error(`\n${message.replace(/^\n+/u, "") || "Telegram outbound operation failed."}`);
+}
+
 export function registerTelegramOutboundAttachmentTool(
   pi: ExtensionAPI,
   deps: TelegramOutboundAttachmentToolRegistrationDeps,
@@ -496,7 +501,7 @@ export function registerTelegramOutboundAttachmentTool(
           phase: "queue",
           count: params.paths.length,
         });
-        throw error;
+        throw formatTelegramOutboundToolError(error);
       }
     },
   });
@@ -548,7 +553,7 @@ export function registerTelegramOutboundMessageTool(
         });
       } catch (error) {
         deps.recordRuntimeEvent?.("message", error, { phase: "direct" });
-        throw error;
+        throw formatTelegramOutboundToolError(error);
       }
     },
   });

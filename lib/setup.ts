@@ -9,7 +9,6 @@ export interface TelegramSetupConfig {
   botId?: number;
   botUsername?: string;
   allowedUserId?: number;
-  lastUpdateId?: number;
 }
 
 export interface TelegramBotTokenPromptSpec {

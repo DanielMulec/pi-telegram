@@ -590,6 +590,11 @@ export interface TelegramInboundRouteRuntimeDeps<
     ctx: TContext,
   ) => Promise<boolean>;
   buttonActionStore?: OutboundHandlers.TelegramButtonActionStore;
+  invokeBoundButtonAction?: (
+    action: OutboundHandlers.TelegramOutboundButtonAction,
+    query: TCallbackQuery,
+    ctx: TContext,
+  ) => Promise<false | "new" | "edit">;
   inboundHandlerRuntime: TelegramInboundHandlerRuntime<TContext>;
   threadStore?: Threads.TelegramTopicTargetStore;
   updateStatus: (ctx: TContext, error?: string) => void;
@@ -1567,6 +1572,16 @@ export function createTelegramInboundRouteRuntime<
         {
           resolveAction: deps.buttonActionStore.resolve,
           answerCallbackQuery: deps.answerCallbackQuery,
+          ...(deps.invokeBoundButtonAction
+            ? {
+                invokeBoundAction: (buttonQuery, action, context) =>
+                  deps.invokeBoundButtonAction!(
+                    action,
+                    buttonQuery as TCallbackQuery,
+                    context,
+                  ),
+              }
+            : {}),
           editMessageReplyMarkup: deps.editMessageReplyMarkup
             ? async (chatId, messageId, replyMarkup) => {
                 try {

@@ -170,30 +170,250 @@ function parseCanonicalTelegramActionAttributes(
   return Object.keys(attributes).length > 0 ? attributes : undefined;
 }
 
+function getTelegramActionPayloadSource(
+  comment: TelegramTopLevelHtmlComment,
+  command: string,
+): { source: string; hasBody: boolean } | undefined {
+  const parsed = parseTopLevelTelegramComment(comment, command);
+  if (!parsed || parsed.head.trimStart().startsWith(":")) return undefined;
+  const source = [parsed.head, parsed.body]
+    .filter((part): part is string => part !== undefined)
+    .join("\n")
+    .trim();
+  return source ? { source, hasBody: parsed.body !== undefined } : undefined;
+}
+
+function isTelegramActionPayload(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
 export function parseTelegramActionPayload(
   comment: TelegramTopLevelHtmlComment,
   command: string,
 ): Record<string, unknown> | undefined {
-  const parsed = parseTopLevelTelegramComment(comment, command);
-  if (!parsed) return undefined;
-  const source = [parsed.head, parsed.body]
-    .filter((part): part is string => part !== undefined)
-    .join("\n")
-    .trim()
-    .replace(/^:\s*/, "");
-  if (!source) return undefined;
-  if (source.startsWith("{")) {
+  const payload = getTelegramActionPayloadSource(comment, command);
+  if (!payload) return undefined;
+  if (payload.source.startsWith("{")) {
     try {
-      const value: unknown = JSON.parse(source);
-      return value !== null && typeof value === "object" && !Array.isArray(value)
-        ? (value as Record<string, unknown>)
-        : undefined;
+      const value: unknown = JSON.parse(payload.source);
+      return isTelegramActionPayload(value) ? value : undefined;
     } catch {
       return undefined;
     }
   }
-  if (parsed.body !== undefined) return undefined;
-  return parseCanonicalTelegramActionAttributes(source);
+  if (payload.hasBody) return undefined;
+  return parseCanonicalTelegramActionAttributes(payload.source);
+}
+
+const TELEGRAM_COMPACT_ACTION_CONTROL_PATTERN = /[\u0000-\u001f\u007f-\u009f]/u;
+
+function parseTelegramAdaptiveActionPayloadRows(
+  source: string,
+): Record<string, unknown>[][] | undefined {
+  let offset = 0;
+  const isStructuralWhitespace = (character: string | undefined): boolean =>
+    character === " " ||
+    character === "\t" ||
+    character === "\r" ||
+    character === "\n";
+  const skipWhitespace = (): void => {
+    while (isStructuralWhitespace(source[offset])) offset += 1;
+  };
+  const consumeOptionalSeparator = (): boolean => {
+    skipWhitespace();
+    if (source[offset] !== ",") return true;
+    offset += 1;
+    skipWhitespace();
+    return source[offset] !== "," && source[offset] !== "]";
+  };
+  const normalizeAtom = (value: string): string | undefined => {
+    const normalized = value.trim();
+    return normalized && !TELEGRAM_COMPACT_ACTION_CONTROL_PATTERN.test(normalized)
+      ? normalized
+      : undefined;
+  };
+  const parseCompactCell = (): Record<string, unknown> | undefined => {
+    if (source[offset] !== "{") return undefined;
+    offset += 1;
+    const atomSources: string[][] = [[]];
+    while (offset < source.length) {
+      const character = source[offset]!;
+      if (character === "\\") {
+        const escaped = source[offset + 1];
+        if (escaped !== "|" && escaped !== "}" && escaped !== "\\") {
+          return undefined;
+        }
+        atomSources.at(-1)!.push(escaped);
+        offset += 2;
+        continue;
+      }
+      if (character === "|") {
+        if (atomSources.length >= 3) return undefined;
+        atomSources.push([]);
+        offset += 1;
+        continue;
+      }
+      if (character === "}") {
+        offset += 1;
+        const atoms = atomSources.map((atom) =>
+          normalizeAtom(atom.join("")),
+        );
+        if (atoms.some((atom) => atom === undefined)) return undefined;
+        const [label, prompt, selectedStyle] = atoms as string[];
+        if (atoms.length === 1) return { value: label };
+        if (atoms.length === 2) return { label, prompt };
+        if (
+          selectedStyle !== "primary" &&
+          selectedStyle !== "success" &&
+          selectedStyle !== "danger"
+        ) return undefined;
+        return { label, prompt, selected_style: selectedStyle };
+      }
+      atomSources.at(-1)!.push(character);
+      offset += 1;
+    }
+    return undefined;
+  };
+  const parseJsonObjectCell = (): Record<string, unknown> | undefined => {
+    if (source[offset] !== "{") return undefined;
+    const start = offset;
+    const stack: string[] = [];
+    let inString = false;
+    let escaped = false;
+    for (let index = start; index < source.length; index += 1) {
+      const character = source[index]!;
+      if (inString) {
+        if (escaped) escaped = false;
+        else if (character === "\\") escaped = true;
+        else if (character === '"') inString = false;
+        continue;
+      }
+      if (character === '"') {
+        inString = true;
+        continue;
+      }
+      if (character === "{" || character === "[") {
+        stack.push(character);
+        continue;
+      }
+      if (character !== "}" && character !== "]") continue;
+      const opening = stack.pop();
+      if (
+        (character === "}" && opening !== "{") ||
+        (character === "]" && opening !== "[")
+      ) return undefined;
+      if (stack.length > 0) continue;
+      const candidate = source.slice(start, index + 1);
+      try {
+        const value: unknown = JSON.parse(candidate);
+        if (!isTelegramActionPayload(value)) return undefined;
+        offset = index + 1;
+        return value;
+      } catch {
+        return undefined;
+      }
+    }
+    return undefined;
+  };
+  const parseCell = (): Record<string, unknown> | undefined => {
+    const start = offset;
+    const jsonCell = parseJsonObjectCell();
+    if (jsonCell) return jsonCell;
+    offset = start;
+    return parseCompactCell();
+  };
+  const parseRow = (): Record<string, unknown>[] | undefined => {
+    if (source[offset] !== "[") return undefined;
+    offset += 1;
+    const row: Record<string, unknown>[] = [];
+    while (offset < source.length) {
+      skipWhitespace();
+      if (source[offset] === "]") {
+        offset += 1;
+        return row.length > 0 ? row : undefined;
+      }
+      if (source[offset] !== "{") return undefined;
+      const cell = parseCell();
+      if (!cell) return undefined;
+      row.push(cell);
+      if (!consumeOptionalSeparator()) return undefined;
+    }
+    return undefined;
+  };
+  const parseMatrix = (): Record<string, unknown>[][] | undefined => {
+    if (source[offset] !== "[") return undefined;
+    offset += 1;
+    const rows: Record<string, unknown>[][] = [];
+    while (offset < source.length) {
+      skipWhitespace();
+      const character = source[offset];
+      if (character === "]") {
+        offset += 1;
+        return rows.length > 0 ? rows : undefined;
+      }
+      if (character === "{") {
+        const cell = parseCell();
+        if (!cell) return undefined;
+        rows.push([cell]);
+      } else if (character === "[") {
+        const row = parseRow();
+        if (!row) return undefined;
+        rows.push(row);
+      } else {
+        return undefined;
+      }
+      if (!consumeOptionalSeparator()) return undefined;
+    }
+    return undefined;
+  };
+
+  skipWhitespace();
+  let rows: Record<string, unknown>[][] | undefined;
+  if (source[offset] === "{") {
+    const cell = parseCell();
+    rows = cell ? [[cell]] : undefined;
+  } else {
+    rows = parseMatrix();
+  }
+  if (!rows) return undefined;
+  skipWhitespace();
+  return offset === source.length ? rows : undefined;
+}
+
+export function parseTelegramActionPayloadRows(
+  comment: TelegramTopLevelHtmlComment,
+  command: string,
+): Record<string, unknown>[][] | undefined {
+  const payload = getTelegramActionPayloadSource(comment, command);
+  if (!payload) return undefined;
+  if (payload.source.startsWith("[") || payload.source.startsWith("{")) {
+    try {
+      const value: unknown = JSON.parse(payload.source);
+      if (isTelegramActionPayload(value)) return [[value]];
+      if (!Array.isArray(value)) return undefined;
+      const rows: Record<string, unknown>[][] = [];
+      for (const entry of value) {
+        if (isTelegramActionPayload(entry)) {
+          rows.push([entry]);
+          continue;
+        }
+        if (
+          !Array.isArray(entry) ||
+          entry.length === 0 ||
+          !entry.every(isTelegramActionPayload)
+        ) {
+          return undefined;
+        }
+        rows.push(entry);
+      }
+      return rows;
+    } catch {
+      return parseTelegramAdaptiveActionPayloadRows(payload.source);
+    }
+  }
+  if (payload.hasBody) return undefined;
+  const attributes = parseCanonicalTelegramActionAttributes(payload.source);
+  return attributes ? [[attributes]] : undefined;
 }
 
 export function normalizeMarkdownAfterVoiceExtraction(

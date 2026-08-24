@@ -54,7 +54,7 @@ Use emoji as stable semantic markers, not decoration. Emoji carry transportable 
 | `➡️` | Choose replacement target | Thread replace/restore target buttons that select which Pi instance should move to the current thread | Use inside the second replace/restore chooser, not for ordinary reroutes. |
 | `☑️` | Activate / choose this item | Model detail activation action, generated button-only choice heading | Positive selection cue; use `🟢 Active` for already-current state. |
 | `❌` | No / cancel | Confirmation cancel buttons | Use for safe cancellation, not destructive removal. |
-| `🗑` | Delete / suppress | Queue delete actions, destructive confirmations, suppression reaction | The explicit queue button deletes; the reaction reversibly suppresses a waiting turn. |
+| `🗑` | Delete / defer removal | Destructive confirmations and removal reaction | In the queue menu, reversible Keep/Skip selectors replace immediate deletion. |
 
 ### State Indicators And Button Grammars
 
@@ -62,13 +62,21 @@ Use emoji as stable semantic markers, not decoration. Emoji carry transportable 
 | --- | --- | --- | --- |
 | `🟢` | Current/active/enabled `On` | Current option in vertical lists, active state rows, active `On` toggle | One strong current marker per option list. |
 | `🟡` | Active `Off` or elevated/filter state | Active `Off` toggle, Priority/Scoped active tab | Yellow means intentionally not-normal or off/default-caution, not error. |
+| `🔴` | Active destructive/deferred disposition | Active queue `Skip` selector | Red distinguishes a prompt that will be discarded at dispatch from reversible neutral or elevated state. |
 | `🟣` | Normal/default active tab | Normal priority tab, All/default scope tab, active page picker | Use for neutral active tabs. |
 | `⚫️` | Inactive placeholder | Inactive toggle values and inactive tabs | Keeps row width stable. |
 | `⬆️` | Navigate upward | `⬆️ Main menu`, `⬆️ Back` | Always first row in submenus. |
 
 ### Queue Reaction Shortcuts
 
-Queue reactions are shortcut controls for waiting turns. Preserve their semantics across Telegram reactions, queue-menu rows, status previews, and tests.
+Queue reactions are shortcut controls for waiting turns. Preserve their semantics across Telegram reactions, queue-menu rows, status previews, and tests. Positive emoji control the Priority/Normal lane; negative emoji control Keep/Skip. These categories are independent, may coexist, and mutate only their own dimension. Crossing lanes appends the prompt at the destination FIFO tail; changing Keep/Skip or changing emoji within one category preserves lane position. Skip wins only when dispatch reaches the prompt.
+
+Queue item detail renders two independent selector rows:
+
+- `🟡 Priority` / `⚫️ Normal` or `⚫️ Priority` / `🟣 Normal` selects the lane.
+- `🟢 Keep` / `⚫️ Skip` or `⚫️ Keep` / `🔴 Skip` selects dispatch disposition.
+
+The menu may clear internal Skip but cannot remove a reaction created by the user through Telegram's Bot API.
 
 | Emoji | Meaning | Canonical surfaces | Notes |
 | --- | --- | --- | --- |
@@ -77,11 +85,11 @@ Queue reactions are shortcut controls for waiting turns. Preserve their semantic
 | `❤` / `❤️` | Promote to priority | Queue reaction shortcut | Normalize display consistently where code normalizes reactions. |
 | `🕊` / `🕊️` | Promote to priority | Queue reaction shortcut | Soft/peaceful promotion gesture. |
 | `🔥` | Promote to priority | Queue reaction shortcut | Urgent/hot promotion gesture. |
-| `👎` | Suppress waiting turn | Queue reaction shortcut and suppressed queue badge | Suppression is reversible and is not negative feedback to the agent. |
-| `👻` | Suppress waiting turn | Queue reaction shortcut and suppressed queue badge | Disappear/suppress metaphor. |
-| `💔` | Suppress waiting turn | Queue reaction shortcut and suppressed queue badge | Reversible cancel metaphor. |
-| `💩` | Suppress waiting turn | Queue reaction shortcut and suppressed queue badge | Reversible reject metaphor. |
-| `🗑` | Suppress or explicitly delete | Queue reaction shortcut, suppressed queue badge, and queue delete UI | The reaction is reversible suppression; only the explicit queue button is destructive. |
+| `👎` | Defer removal of waiting turn | Queue reaction shortcut and queue emoji marker | Reversible until the marked turn reaches dispatch; not negative feedback to the agent. |
+| `👻` | Defer removal of waiting turn | Queue reaction shortcut and queue emoji marker | Disappear/remove metaphor. |
+| `💔` | Defer removal of waiting turn | Queue reaction shortcut and queue emoji marker | Reversible cancel metaphor. |
+| `💩` | Defer removal of waiting turn | Queue reaction shortcut and queue emoji marker | Reversible reject metaphor. |
+| `🗑` | Defer removal | Queue reaction shortcut and queue emoji marker | Like Skip, the reaction remains reversible until dispatch reaches the marked turn. |
 
 ### Decorative Or Local-Example Emoji
 
@@ -160,22 +168,23 @@ Examples:
 - `⚫️ Priority` / `🟣 Normal`
 - `1` / `🟣 2` / `3`
 
-## Vertical Option Lists
+## Option Lists
 
-Vertical option lists choose one value from a potentially longer list, for example model selection, thinking level, voice reply mode, or time injection mode.
+Option lists choose one value from a fixed set, for example model selection, thinking level, voice reply mode, or time injection mode.
 
 Rules:
 
-- Put each option on its own row.
+- Put each option on its own row when labels are long, the set may grow, or scanning benefits from full width.
+- A fixed set of short, ordered peer values may use compact rows of up to three buttons.
+- Keep a semantically distinct value such as thinking `off` on its own full-width row before grouped intensity values.
 - Mark only the current value with `🟢`.
 - Leave non-current values without emoji.
 - Use lowercase labels when the option is a value.
 
 Examples:
 
-- `hidden`
-- `🟢 mirror`
-- `always`
+- Vertical: `hidden`, `🟢 mirror`, `always`.
+- Thinking: full-width `off`, then `minimal` / `low` / `🟢 medium`, then `high` / `xhigh` / `max`.
 
 ## Generated Prompt Buttons
 

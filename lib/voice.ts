@@ -38,15 +38,9 @@ function getNextAvailableProviderId<T>(
   return id;
 }
 
-export type TelegramVoiceReplyMode = "hidden" | "mirror" | "always";
+export type TelegramVoiceReplyMode = "manual" | "mirror" | "always";
 
-export type TelegramVoiceSynthesisProviderResult =
-  | string
-  | {
-      audioPath: string;
-      transcriptText?: string;
-    }
-  | undefined;
+export type TelegramVoiceSynthesisProviderResult = string | undefined;
 
 export interface TelegramVoiceTurnView {
   voiceReplyPreferred?: boolean;
@@ -215,7 +209,7 @@ export function clearTelegramVoiceTranscriptionProviders(): void {
 // --- Voice Reply Modes ---
 
 export const TELEGRAM_VOICE_REPLY_MODES = [
-  "hidden",
+  "manual",
   "mirror",
   "always",
 ] as const;
@@ -224,33 +218,15 @@ export const TELEGRAM_VOICE_REPLY_MODES = [
  * Returns the active voice reply mode for the current session.
  *
  * Pi-telegram owns reply-mode policy through telegram.json. If
- * config.voice.replyMode is missing, invalid, or legacy `manual`, the effective
- * mode is hidden.
+ * config.voice.replyMode is missing, invalid, or legacy `hidden`, the effective
+ * mode is manual.
  */
 export function getTelegramVoiceReplyMode(config?: {
   voice?: { replyMode?: string };
 }): TelegramVoiceReplyMode {
   const configMode = config?.voice?.replyMode;
-  if (
-    configMode &&
-    (TELEGRAM_VOICE_REPLY_MODES as readonly string[]).includes(configMode)
-  ) {
-    return configMode as TelegramVoiceReplyMode;
-  }
-  return "hidden";
-}
-
-/**
- * Returns whether the user wants the voice synthesis provider's transcript attached
- * as a caption on the voice message.
- *
- * Reads from `config.voice.sendTranscript`.
- * Default: false (no transcript text sent at all).
- */
-export function getTelegramVoiceSendTranscript(config?: {
-  voice?: { sendTranscript?: boolean };
-}): boolean {
-  return !!config?.voice?.sendTranscript;
+  if (configMode === "mirror" || configMode === "always") return configMode;
+  return "manual";
 }
 
 // --- Voice Turn Helpers ---

@@ -8,7 +8,6 @@ type MaybePromise<T> = T | Promise<T>;
 
 export interface TelegramPollingConfig {
   botToken?: string;
-  lastUpdateId?: number;
 }
 
 export interface TelegramUpdate {
@@ -227,6 +226,7 @@ export interface TelegramPollingAdmissionRuntime<TContext> {
 
 export function createTelegramPollingAdmissionRuntime<TContext>(deps: {
   polling: TelegramPollingController<TContext>;
+  prepareStart?: () => MaybePromise<void>;
   validateStart?: () => void;
   worker: {
     onSessionStart: (ctx: TContext) => Promise<void>;
@@ -235,6 +235,7 @@ export function createTelegramPollingAdmissionRuntime<TContext>(deps: {
   return {
     isActive: deps.polling.isActive,
     async start(ctx) {
+      await deps.prepareStart?.();
       deps.validateStart?.();
       await deps.worker.onSessionStart(ctx);
       await deps.polling.start(ctx);
@@ -256,7 +257,12 @@ export type TelegramDurablePollingRuntimeAssemblyDeps<
   "appendUpdateBatch" | "getJournalEntryCount" | "signalUpdateWorker"
 > & {
   journal: {
-    appendBatch: (updates: readonly TUpdate[]) => MaybePromise<unknown>;
+    appendBatch: (
+      updates: readonly TUpdate[],
+      acceptedThroughUpdateId?: number,
+    ) => MaybePromise<unknown>;
+    getAcceptedThroughUpdateId: () => number | undefined;
+    prepareCursorCutover?: () => MaybePromise<void>;
     getEntryCount: () => number;
     signalWorker: () => void;
     getBootstrapEntryCount: () => number;
@@ -274,13 +280,15 @@ export function createTelegramDurablePollingRuntimeAssembly<
   const controller = createTelegramPollingControllerRuntime({
     ...deps,
     appendUpdateBatch: deps.journal.appendBatch,
+    getAcceptedThroughUpdateId: deps.journal.getAcceptedThroughUpdateId,
     getJournalEntryCount: deps.journal.getEntryCount,
     signalUpdateWorker: deps.journal.signalWorker,
   });
   const admission = createTelegramPollingAdmissionRuntime({
     polling: controller,
+    prepareStart: deps.journal.prepareCursorCutover,
     validateStart() {
-      if (deps.getConfig().lastUpdateId !== undefined) return;
+      if (deps.journal.getAcceptedThroughUpdateId() !== undefined) return;
       if (deps.journal.getBootstrapEntryCount() === 0) return;
       throw new TelegramPollingCursorBootstrapError(
         "Telegram polling cursor is missing while the durable update journal is non-empty.",
@@ -356,6 +364,7 @@ export function createTelegramPollingControllerRuntime<
       getUpdatesRequestBudgetMs: deps.getUpdatesRequestBudgetMs,
       persistConfig: deps.persistConfig,
       appendUpdateBatch: deps.appendUpdateBatch,
+      getAcceptedThroughUpdateId: deps.getAcceptedThroughUpdateId,
       getJournalEntryCount: deps.getJournalEntryCount,
       signalUpdateWorker: deps.signalUpdateWorker,
       prepareUpdateBatch: deps.prepareUpdateBatch,
@@ -1185,6 +1194,32 @@ export class TelegramPollingCursorBootstrapError extends Error {
   }
 }
 
+export interface TelegramPollingCursorCutoverDeps {
+  getLegacyCursor: () => number | undefined;
+  readJournal: () => {
+    acceptedThroughUpdateId?: number;
+    entries: readonly { updateId: number }[];
+  };
+  publishJournalCursor: (acceptedThroughUpdateId: number) => MaybePromise<void>;
+  removeLegacyCursor: () => MaybePromise<void>;
+}
+
+/** Transfer one legacy config cursor into journal authority before deleting it. */
+export async function cutOverTelegramPollingCursor(
+  deps: TelegramPollingCursorCutoverDeps,
+): Promise<void> {
+  const legacyCursor = deps.getLegacyCursor();
+  if (legacyCursor === undefined) return;
+  const snapshot = deps.readJournal();
+  if (snapshot.acceptedThroughUpdateId === undefined) {
+    const provenEntryCursor = snapshot.entries.at(-1)?.updateId;
+    await deps.publishJournalCursor(
+      Math.max(legacyCursor, provenEntryCursor ?? legacyCursor),
+    );
+  }
+  await deps.removeLegacyCursor();
+}
+
 export interface TelegramPollingBatchAdmissionResult {
   updateCount: number;
   latestUpdateId?: number;
@@ -1195,7 +1230,11 @@ export interface TelegramPollingBatchAdmissionDeps<
 > extends TelegramRuntimeEventRecorderPort {
   updates: readonly TUpdate[];
   config: TelegramPollingConfig;
-  appendBatch: (updates: readonly TUpdate[]) => MaybePromise<unknown>;
+  appendBatch: (
+    updates: readonly TUpdate[],
+    acceptedThroughUpdateId?: number,
+  ) => MaybePromise<unknown>;
+  getAcceptedThroughUpdateId?: () => number | undefined;
   persistConfig: (config: TelegramPollingConfig) => Promise<void>;
   signalWorker: () => void;
   onPhaseChange?: (
@@ -1229,7 +1268,8 @@ export async function admitTelegramPollingUpdateBatch<
   deps: TelegramPollingBatchAdmissionDeps<TUpdate>,
 ): Promise<TelegramPollingBatchAdmissionResult> {
   if (deps.updates.length === 0) return { updateCount: 0 };
-  validateTelegramPollingBatch(deps.updates, deps.config.lastUpdateId);
+  const acceptedThroughUpdateId = deps.getAcceptedThroughUpdateId?.();
+  validateTelegramPollingBatch(deps.updates, acceptedThroughUpdateId);
   const latestUpdateId = getLatestTelegramUpdateId(deps.updates);
   if (latestUpdateId === undefined) return { updateCount: 0 };
   reportTelegramPollingPhase(
@@ -1237,18 +1277,7 @@ export async function admitTelegramPollingUpdateBatch<
     "persisting-journal",
     deps.updates[0]?.update_id,
   );
-  await deps.appendBatch(deps.updates);
-  reportTelegramPollingPhase(deps, "persisting-offset", latestUpdateId);
-  const previousUpdateId = deps.config.lastUpdateId;
-  deps.config.lastUpdateId = latestUpdateId;
-  try {
-    await deps.persistConfig(deps.config);
-  } catch (error) {
-    if (deps.config.lastUpdateId === latestUpdateId) {
-      deps.config.lastUpdateId = previousUpdateId;
-    }
-    throw error;
-  }
+  await deps.appendBatch(deps.updates, latestUpdateId);
   try {
     deps.signalWorker();
   } catch (error) {
@@ -1275,7 +1304,11 @@ export interface TelegramPollLoopDeps<
   ) => Promise<TUpdate[]>;
   getUpdatesRequestBudgetMs?: (body: Record<string, unknown>) => number;
   persistConfig: (config: TelegramPollingConfig) => Promise<void>;
-  appendUpdateBatch: (updates: readonly TUpdate[]) => MaybePromise<unknown>;
+  appendUpdateBatch: (
+    updates: readonly TUpdate[],
+    acceptedThroughUpdateId?: number,
+  ) => MaybePromise<unknown>;
+  getAcceptedThroughUpdateId?: () => number | undefined;
   getJournalEntryCount: () => number;
   signalUpdateWorker: () => void;
   prepareUpdateBatch?: (updates: readonly TUpdate[]) => void;
@@ -1301,7 +1334,11 @@ export interface TelegramPollLoopRunnerDeps<
   ) => Promise<TUpdate[]>;
   getUpdatesRequestBudgetMs?: (body: Record<string, unknown>) => number;
   persistConfig: (config: TelegramPollingConfig) => Promise<void>;
-  appendUpdateBatch: (updates: readonly TUpdate[]) => MaybePromise<unknown>;
+  appendUpdateBatch: (
+    updates: readonly TUpdate[],
+    acceptedThroughUpdateId?: number,
+  ) => MaybePromise<unknown>;
+  getAcceptedThroughUpdateId?: () => number | undefined;
   getJournalEntryCount: () => number;
   signalUpdateWorker: () => void;
   prepareUpdateBatch?: (updates: readonly TUpdate[]) => void;
@@ -1356,6 +1393,7 @@ export function createTelegramPollLoopRunner<
       getUpdatesRequestBudgetMs: deps.getUpdatesRequestBudgetMs,
       persistConfig: deps.persistConfig,
       appendUpdateBatch: deps.appendUpdateBatch,
+      getAcceptedThroughUpdateId: deps.getAcceptedThroughUpdateId,
       getJournalEntryCount: deps.getJournalEntryCount,
       signalUpdateWorker: deps.signalUpdateWorker,
       prepareUpdateBatch: deps.prepareUpdateBatch,
@@ -1494,14 +1532,16 @@ export async function runTelegramPollLoop<
     // ignore
   }
   if (
-    deps.config.lastUpdateId === undefined &&
+    deps.getAcceptedThroughUpdateId?.() === undefined &&
     deps.getJournalEntryCount() > 0
   ) {
     throw new TelegramPollingCursorBootstrapError(
       "Telegram polling cursor is missing while the durable update journal is non-empty.",
     );
   }
-  if (deps.config.lastUpdateId === undefined) {
+  if (
+    deps.getAcceptedThroughUpdateId?.() === undefined
+  ) {
     try {
       const request = buildTelegramInitialSyncRequest();
       reportTelegramPollingPhase(deps, "long-poll");
@@ -1514,8 +1554,7 @@ export async function runTelegramPollLoop<
           "persisting-offset",
           lastUpdateId,
         );
-        deps.config.lastUpdateId = lastUpdateId;
-        await deps.persistConfig(deps.config);
+        await deps.appendUpdateBatch([], lastUpdateId);
         deps.recordRuntimeEvent?.(
           "polling",
           new Error("Initialized Telegram cursor without executing history."),
@@ -1538,7 +1577,9 @@ export async function runTelegramPollLoop<
   while (!deps.signal.aborted) {
     try {
       currentUpdateId = undefined;
-      const request = buildTelegramLongPollRequest(deps.config.lastUpdateId);
+      const request = buildTelegramLongPollRequest(
+        deps.getAcceptedThroughUpdateId?.(),
+      );
       reportTelegramPollingPhase(deps, "long-poll");
       const updates = await requestTelegramUpdatesWithinBudget(deps, request);
       reportTelegramPollingResponse(deps, updates.length);
@@ -1549,6 +1590,7 @@ export async function runTelegramPollLoop<
         updates,
         config: deps.config,
         appendBatch: deps.appendUpdateBatch,
+        getAcceptedThroughUpdateId: deps.getAcceptedThroughUpdateId,
         persistConfig: deps.persistConfig,
         signalWorker: deps.signalUpdateWorker,
         onPhaseChange: deps.onPhaseChange,

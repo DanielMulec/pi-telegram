@@ -99,7 +99,7 @@ test("Outbound text handler preserves inline buttons on transformed replies", as
   const sent: Array<{ markdown: string; replyMarkup: unknown }> = [];
   const actions: unknown[] = [];
   const plan = planTelegramButtonReply(
-    ["Answer.", "", '<!-- telegram_button: {"value":"Continue"} -->'].join("\n"),
+    ["Answer.", "", '<!-- telegram_button {"value":"Continue"} -->'].join("\n"),
     {
       registerAction: (action) => {
         actions.push(action);
@@ -212,7 +212,7 @@ test("Voice reply planner extracts multiline JSON telegram_voice comments", () =
     [
       "Technical answer.",
       "",
-      "<!-- telegram_voice: {",
+      "<!-- telegram_voice {",
       '  "text": "Short speakable summary.",',
       '  "lang": "ru",',
       '  "rate": "+20%"',
@@ -235,7 +235,7 @@ test("Voice reply planner supports escaped lines in JSON comments", () => {
     [
       "Visible answer.",
       "",
-      '<!-- telegram_voice: {"text":"Первая строка.\\nВторая строка.","lang":"ru","rate":"+5%"} -->',
+      '<!-- telegram_voice {"text":"Первая строка.\\nВторая строка.","lang":"ru","rate":"+5%"} -->',
     ].join("\n"),
   );
   assert.deepEqual(plan, {
@@ -251,7 +251,7 @@ test("Voice reply planner supports escaped lines in JSON comments", () => {
 
 test("Voice reply planner supports compact JSON comments", () => {
   const plan = planTelegramVoiceReply(
-    'Text before.\n\n<!-- telegram_voice: {"text":"Inline summary."} -->',
+    'Text before.\n\n<!-- telegram_voice {"text":"Inline summary."} -->',
   );
   assert.deepEqual(plan, {
     markdown: "Text before.",
@@ -305,7 +305,7 @@ test("Voice reply planner keeps multiple telegram_voice blocks as independent ar
       "",
       '<!-- telegram_voice text="First summary." lang="ru" rate="+20%" -->',
       "",
-      '<!-- telegram_voice: {"text":"Second summary.","lang":"en","rate":"+10%"} -->',
+      '<!-- telegram_voice {"text":"Second summary.","lang":"en","rate":"+10%"} -->',
     ].join("\n"),
   );
   assert.deepEqual(plan, {
@@ -371,7 +371,7 @@ test("Comment preview stripping hides generic and partial comments", () => {
       [
         "Visible text.",
         "",
-        '<!-- telegram_button: {"label":"Hidden","prompt":"Hidden prompt."} -->',
+        '<!-- telegram_button {"label":"Hidden","prompt":"Hidden prompt."} -->',
       ].join("\n"),
     ),
     "Visible text.",
@@ -433,7 +433,7 @@ test("Outbound comments resume after indented and longer closing fences", () => 
     "<!-- telegram_button label=Skip -->",
     "   ````",
     "",
-    '<!-- telegram_button: {"value":"OK"} -->',
+    '<!-- telegram_button {"value":"OK"} -->',
   ].join("\n");
   const actions: unknown[] = [];
   const plan = planTelegramButtonReply(markdown, {
@@ -487,7 +487,7 @@ test("Button reply planner supports independent action comments", () => {
     [
       "Visible answer.",
       "",
-      '<!-- telegram_button: {"label":"OK","prompt":"PROMPT"} -->',
+      '<!-- telegram_button {"label":"OK","prompt":"PROMPT"} -->',
       "",
       '<!-- telegram_button label="More" prompt="Continue with more detail" -->',
     ].join("\n"),
@@ -522,7 +522,7 @@ test("Outbound reply planner strips voice and button markup without losing artif
     [
       "Visible answer.",
       "",
-      '<!-- telegram_voice: {"text":"Speak this summary."} -->',
+      '<!-- telegram_voice {"text":"Speak this summary."} -->',
       "",
       '<!-- telegram_button label="Continue" prompt="Continue with context." -->',
     ].join("\n"),
@@ -541,7 +541,7 @@ test("Outbound reply planner strips voice and button markup without losing artif
 test("Button reply planner supports compact value payload", () => {
   const actions: unknown[] = [];
   const plan = planTelegramButtonReply(
-    ["Visible answer.", "", '<!-- telegram_button: {"value":"OK"} -->'].join("\n"),
+    ["Visible answer.", "", '<!-- telegram_button {"value":"OK"} -->'].join("\n"),
     {
       registerAction: (action) => {
         actions.push(action);
@@ -586,9 +586,9 @@ test("Button reply planner accepts complete JSON actions", () => {
     [
       "Visible answer.",
       "",
-      '<!-- telegram_button: {"label":"Boundary","prompt":"Where does JAM end and DEOS begin?"} -->',
+      '<!-- telegram_button {"label":"Boundary","prompt":"Where does JAM end and DEOS begin?"} -->',
       "",
-      '<!-- telegram_button: {"label":"Sources","prompt":"Which DEOS sources are canonical?"} -->',
+      '<!-- telegram_button {"label":"Sources","prompt":"Which DEOS sources are canonical?"} -->',
     ].join("\n"),
     {
       registerAction: (action) => {
@@ -1385,11 +1385,11 @@ test("Voice reply sender falls back to next handler when sendMultipart throws", 
   dispose2();
 });
 
-test("Voice reply sender accepts provider returning { audioPath }", async () => {
+test("Voice reply sender accepts provider returning an audio path", async () => {
   const events: unknown[] = [];
-  const dispose = registerTelegramVoiceSynthesisProvider(async () => ({
-    audioPath: "/tmp/response.ogg",
-  }));
+  const dispose = registerTelegramVoiceSynthesisProvider(
+    async () => "/tmp/response.ogg",
+  );
   const sendVoiceReply = createTelegramVoiceReplySender({
     execCommand: async () => ({
       stdout: "",
@@ -1408,33 +1408,5 @@ test("Voice reply sender accepts provider returning { audioPath }", async () => 
   ) as Record<string, unknown>;
   assert.equal(fileEvent.filePath, "/tmp/response.ogg");
   assert.equal(fileEvent.fileName, "response.ogg");
-  dispose();
-});
-
-test("Voice reply sender passes transcriptText as caption", async () => {
-  const fields: Record<string, unknown>[] = [];
-  const dispose = registerTelegramVoiceSynthesisProvider(async () => ({
-    audioPath: "/tmp/response.ogg",
-    transcriptText: "Clean text without speech tags",
-  }));
-  const sendVoiceReply = createTelegramVoiceReplySender({
-    execCommand: async () => ({
-      stdout: "",
-      stderr: "",
-      code: 0,
-      killed: false,
-    }),
-    sendMultipart: async (_method, f) => {
-      fields.push(f);
-    },
-    recordRuntimeEvent: () => {},
-  });
-  await sendVoiceReply({ chatId: 10, replyToMessageId: 20 }, "hello");
-  assert.equal(fields.length, 1);
-  assert.equal((fields[0] as Record<string, unknown>).chat_id, "10");
-  assert.equal(
-    (fields[0] as Record<string, unknown>).caption,
-    "Clean text without speech tags",
-  );
   dispose();
 });

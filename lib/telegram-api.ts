@@ -37,6 +37,8 @@ function getTelegramApiTempDir(): string {
   return resolveTelegramTempDir();
 }
 const TELEGRAM_TEMP_FILE_MAX_AGE_MS = 24 * 60 * 60 * 1000;
+const TELEGRAM_TEMP_SCRATCH_FILE_PATTERN =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}-/u;
 const TELEGRAM_INBOUND_FILE_MAX_BYTES = getTelegramInboundFileByteLimitFromEnv(
   process.env,
   ["PI_TELEGRAM_INBOUND_FILE_MAX_BYTES", "TELEGRAM_MAX_FILE_SIZE_BYTES"],
@@ -1116,7 +1118,9 @@ export async function cleanupTelegramTempFiles(
     return 0;
   }
   for (const entry of entries) {
-    if (!entry.isFile()) continue;
+    if (!entry.isFile() || !TELEGRAM_TEMP_SCRATCH_FILE_PATTERN.test(entry.name)) {
+      continue;
+    }
     const path = join(tempDir, entry.name);
     try {
       const stats = await stat(path);

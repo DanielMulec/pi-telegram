@@ -103,7 +103,7 @@ export interface TelegramModelMenuRuntimeOptions<
 }
 
 export interface MenuSettingsManager {
-  reload: () => Promise<void>;
+  reload?: () => Promise<void>;
   flush?: () => Promise<void>;
   getEnabledModels: () => string[] | undefined;
   setEnabledModels?: (patterns: string[] | undefined) => void;
@@ -119,7 +119,9 @@ export interface TelegramModelMenuStateBuilderDeps<
     TelegramModelMenuStateBuilderContext<TModel>,
 > {
   runtime: TelegramModelMenuRuntime<TModel>;
-  createSettingsManager: (cwd: string) => MenuSettingsManager;
+  createSettingsManager: (
+    cwd: string,
+  ) => MenuSettingsManager | PromiseLike<MenuSettingsManager>;
   getActiveModel: (ctx: TContext) => TModel | undefined;
 }
 
@@ -490,13 +492,15 @@ export function createTelegramModelMenuStateBuilder<
   threadId?: number,
 ) => Promise<TelegramModelMenuState<TModel>> {
   return async (chatId, ctx, threadId) => {
-    const settingsManager = deps.createSettingsManager(ctx.cwd);
+    const settingsManager = await deps.createSettingsManager(ctx.cwd);
     return deps.runtime.buildState({
       chatId,
       threadId,
       activeModel: deps.getActiveModel(ctx),
       ctx,
-      reloadSettings: () => settingsManager.reload(),
+      reloadSettings: async () => {
+        await settingsManager.reload?.();
+      },
       getConfiguredScopedModelPatterns: () =>
         settingsManager.getEnabledModels(),
     });

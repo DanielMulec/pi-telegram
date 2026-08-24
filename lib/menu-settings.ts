@@ -149,9 +149,7 @@ export const TIME_INJECTION_MODE_SETTINGS_TITLE =
   "<b>🕒 Time injection mode:</b>";
 export const VOICE_REPLY_MODE_SETTINGS_TITLE = "<b>👄 Voice reply mode:</b>";
 
-type TelegramVoiceReplyModeSetting = TelegramVoiceReplyMode | "hidden";
-
-function getVoiceReplyModeLabel(mode: TelegramVoiceReplyModeSetting): string {
+function getVoiceReplyModeLabel(mode: TelegramVoiceReplyMode): string {
   return mode;
 }
 
@@ -162,8 +160,8 @@ function getTelegramSettingsStateValueLabel(value: string): string {
 function getVoiceReplyModeSetting(
   mode: TelegramVoiceReplyMode,
   configured: boolean,
-): TelegramVoiceReplyModeSetting {
-  return configured ? mode : "hidden";
+): TelegramVoiceReplyMode {
+  return configured ? mode : "manual";
 }
 
 export function buildTelegramSettingsMenuText(): string {
@@ -246,8 +244,8 @@ export function buildVoiceReplyModeSettingsText(
     "",
     "Controls when pi-telegram converts assistant text replies into Telegram voice messages.",
     "",
-    "<code>-</code> <code>hidden</code> (default): add no automatic voice context; explicit 'telegram_voice' actions still work.",
-    "<code>-</code> <code>mirror</code>: voice input activates automatic voice delivery; text input follows 'hidden' behavior.",
+    "<code>-</code> <code>manual</code> (default): add no automatic voice context; explicit 'telegram_voice' actions still work.",
+    "<code>-</code> <code>mirror</code>: voice input activates automatic voice delivery; text input follows 'manual' behavior.",
     "<code>-</code> <code>always</code>: activate automatic voice delivery for every reply.",
   ].join("\n");
 }
@@ -502,7 +500,7 @@ export function buildVoiceReplyModeSettingsReplyMarkup(
   configured = true,
 ): TelegramSettingsMenuReplyMarkup {
   const activeMode = getVoiceReplyModeSetting(mode, configured);
-  const modes: TelegramVoiceReplyModeSetting[] = ["hidden", "mirror", "always"];
+  const modes: TelegramVoiceReplyMode[] = ["manual", "mirror", "always"];
   return {
     inline_keyboard: [
       [{ text: "⬆️ Back", callback_data: "settings:list" }],
@@ -661,12 +659,18 @@ export async function handleTelegramSettingsMenuCallbackAction(
   }
   if (data.startsWith("settings:set:voice-reply:")) {
     const mode = data.slice("settings:set:voice-reply:".length);
-    if (mode === "hidden" || mode === "mirror" || mode === "always") {
-      await deps.setVoiceReplyMode(mode === "hidden" ? undefined : mode);
+    if (
+      mode === "manual" ||
+      mode === "hidden" ||
+      mode === "mirror" ||
+      mode === "always"
+    ) {
+      const normalizedMode = mode === "hidden" ? "manual" : mode;
+      await deps.setVoiceReplyMode(normalizedMode);
       await updateVoiceReplyModeSettingsMessage(deps);
       await deps.answerCallbackQuery(
         callbackQueryId,
-        `Voice reply mode: ${mode}`,
+        `Voice reply mode: ${normalizedMode}`,
       );
       return true;
     }
