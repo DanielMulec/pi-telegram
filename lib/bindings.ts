@@ -1025,19 +1025,27 @@ export function registerTelegramLifecycleRuntimeHooks({
     });
   };
   let observedAutomaticCompaction = false;
-  const sendCompactionNotice = async (text: string): Promise<void> => {
+  // Serial delivery chain: notices keep their enqueue order, but a hung or
+  // slow Telegram send must not hold the Pi compaction lifecycle hooks open.
+  // Late tasks re-fence on their originating session context before sending.
+  let compactionNoticeChain: Promise<void> = Promise.resolve();
+  const sendCompactionNotice = (ctx: Pi.ExtensionContext, text: string): void => {
     const turn = activeTurnRuntime.get();
     const target = turn?.target ?? proactivePushTargetGetter?.();
     if (!target) return;
-    try {
-      await sendMarkdownReply(target.chatId, turn?.replyToMessageId, text, {
-        target,
-      });
-    } catch (error) {
-      recordRuntimeEvent("delivery", error, {
-        phase: "compaction-notice",
-      });
-    }
+    const deliver = async (): Promise<void> => {
+      if (!isSessionContextActive(ctx)) return;
+      try {
+        await sendMarkdownReply(target.chatId, turn?.replyToMessageId, text, {
+          target,
+        });
+      } catch (error) {
+        recordRuntimeEvent("delivery", error, {
+          phase: "compaction-notice",
+        });
+      }
+    };
+    compactionNoticeChain = compactionNoticeChain.then(deliver, deliver);
   };
   const compactionObserver = Lifecycle.createTelegramCompactionObserverRuntime({
     isContextActive: isSessionContextActive,
@@ -1106,7 +1114,7 @@ export function registerTelegramLifecycleRuntimeHooks({
       activityRuntime.onCompactionStart(Pi.getSessionCompactionReason(event));
       compactionObserver.onSessionBeforeCompact(event, ctx);
       if (shouldNotify) {
-        await sendCompactionNotice(Commands.TELEGRAM_COMPACTION_STARTED_TEXT);
+        sendCompactionNotice(ctx, Commands.TELEGRAM_COMPACTION_STARTED_TEXT);
       }
     },
     async onSessionCompact(event, ctx) {
@@ -1115,7 +1123,7 @@ export function registerTelegramLifecycleRuntimeHooks({
       compactionObserver.onSessionCompact(event, ctx);
       if (observedAutomaticCompaction) {
         observedAutomaticCompaction = false;
-        await sendCompactionNotice(Commands.TELEGRAM_COMPACTION_COMPLETED_TEXT);
+        sendCompactionNotice(ctx, Commands.TELEGRAM_COMPACTION_COMPLETED_TEXT);
       }
     },
     async onAgentStart(event, ctx) {

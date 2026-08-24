@@ -988,6 +988,153 @@ test("Lifecycle binding disconnects only graceful quit and preserves cleanup aft
   ]);
 });
 
+test("Hung compaction notice send does not hold session_before_compact open", async () => {
+  const events: string[] = [];
+  let releaseStartedNotice!: () => void;
+  const startedNoticeGate = new Promise<void>((resolve) => {
+    releaseStartedNotice = resolve;
+  });
+  const sent: string[] = [];
+  const harness = createBindingApiHarness();
+  const deps = {
+    pi: harness.api,
+    activityRuntime: {
+      recordInputSource: () => {},
+      onAgentStart: () => {},
+      onAssistantEvent: () => {},
+      onToolStart: () => {},
+      onToolUpdate: () => {},
+      onToolEnd: () => {},
+      onCompactionStart: () => events.push("compact-start"),
+      onCompactionEnd: () => events.push("compact-end"),
+      onCompactionAbandoned: () => {},
+      onAgentEnd: () => {},
+      onAgentSettled: () => {},
+      onSessionShutdown: () => {},
+    },
+    assistantOutputRuntime: { start: () => {}, stop: () => {} },
+    sessionLifecycleRuntime: {
+      onSessionStart: async () => {},
+      onSessionShutdown: async () => {},
+      onModelSelect: () => {},
+    },
+    configStore: { get: () => ({}), getOutboundHandlers: () => [] },
+    abort: { setHandler: () => {}, clearHandler: () => {} },
+    typing: { stop: () => {}, waitForIdle: async () => {} },
+    progress: {
+      start: () => ({ active: true, chatId: 1, text: "", updatedAtMs: 0 }),
+      update: () => undefined,
+      stop: () => undefined,
+      get: () => undefined,
+    },
+    lifecycle: {
+      resetActiveToolExecutions: () => {},
+      clearDispatchPending: () => {},
+      hasDispatchPending: () => false,
+      setFoldQueuedPromptsIntoHistory: () => {},
+      shouldFoldQueuedPromptsIntoHistory: () => false,
+      getActiveToolExecutions: () => 0,
+      setActiveToolExecutions: () => {},
+      setCompactionInProgress: () => {},
+    },
+    activeTurnRuntime: {
+      clear: () => {},
+      has: () => true,
+      set: () => {},
+      get: () => ({ chatId: 42, target: { chatId: 42, threadId: 9 } }),
+    },
+    telegramQueueStore: {
+      getQueuedItems: () => [],
+      setQueuedItems: () => {},
+    },
+    modelSwitchController: {
+      clearPendingSwitch: () => {},
+      triggerPendingAbort: () => {},
+    },
+    previewRuntime: {
+      resetState: () => undefined,
+      clear: () => {},
+      setPendingText: () => {},
+      onMessageStart: async () => {},
+      onMessageUpdate: async () => {},
+    },
+    promptDispatchRuntime: { startTypingLoop: () => {} },
+    deferredQueueDispatchRuntime: { request: () => {} },
+    modelContextAvailabilityRuntime: { reconcile: () => {} },
+    buttonActionStore: { register: () => "button-action" },
+    callMultipart: async () => ({ ok: true }),
+    sendChatAction: async () => ({ ok: true }),
+    sendRecordVoiceAction: async () => ({ ok: true }),
+    sendMarkdownReply: async (
+      _chatId: number,
+      _replyToMessageId: number | undefined,
+      text: string,
+    ) => {
+      sent.push(text);
+      if (text === "🗜 Compaction started.") await startedNoticeGate;
+      if (text === "✅ Compaction completed.") {
+        throw new Error("telegram unavailable");
+      }
+      return 77;
+    },
+    sendTextReply: async () => ({ ok: true }),
+    editInteractiveMessage: async () => undefined,
+    deleteMessage: async () => undefined,
+    dispatchNextQueuedTelegramTurn: () => {},
+    answerGuestQuery: async () => ({ ok: true }),
+    sendGuestReply: async () => ({ ok: true }),
+    finalizeMarkdownPreview: async () => undefined,
+    isProactivePushEnabled: () => false,
+    canSendAgentActivity: () => false,
+    updateStatus: () => {},
+    recordRuntimeEvent: (
+      _category: string,
+      _error: unknown,
+      details?: { phase?: string },
+    ) => {
+      if (details?.phase) events.push(`runtime:${details.phase}`);
+    },
+  } as unknown as Parameters<typeof registerTelegramLifecycleRuntimeHooks>[0];
+
+  registerTelegramLifecycleRuntimeHooks(deps);
+  let settled = false;
+  const settledHook = async () => {
+    await getRequiredBindingHandler(harness.handlers, "session_before_compact")(
+      { type: "session_before_compact" },
+      {} as ExtensionContext,
+    );
+    settled = true;
+  };
+  await Promise.race([
+    settledHook(),
+    new Promise((resolve) => setTimeout(resolve, 50)),
+  ]);
+  assert.equal(
+    settled,
+    true,
+    "hung Telegram notice send must not hold Pi compaction open",
+  );
+  assert.deepEqual(sent, ["🗜 Compaction started."]);
+
+  await getRequiredBindingHandler(harness.handlers, "session_compact")(
+    { type: "session_compact" },
+    {} as ExtensionContext,
+  );
+  assert.deepEqual(
+    sent,
+    ["🗜 Compaction started."],
+    "completed notice must queue behind the still-hung started notice",
+  );
+
+  releaseStartedNotice();
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  assert.deepEqual(sent, [
+    "🗜 Compaction started.",
+    "✅ Compaction completed.",
+  ]);
+  assert.ok(events.includes("runtime:compaction-notice"));
+});
+
 test("Lifecycle binding routes native typing, previews, and normalized activity", async () => {
   const events: string[] = [];
   const harness = createBindingApiHarness();
@@ -1139,6 +1286,9 @@ test("Lifecycle binding routes native typing, previews, and normalized activity"
     { type: "session_before_compact" },
     {} as ExtensionContext,
   );
+  // Compaction notices now deliver through a serial background chain so a
+  // hung send cannot hold the lifecycle hook open; flush it before asserting.
+  await new Promise((resolve) => setTimeout(resolve, 0));
 
   assert.deepEqual(events, [
     "activity:agent-start:none",
